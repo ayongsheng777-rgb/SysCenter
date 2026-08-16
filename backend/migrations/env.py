@@ -15,7 +15,8 @@ import os
 try:
     from dotenv import load_dotenv
 
-    load_dotenv()
+    # 显式指向项目根目录 .env（alembic 从 backend 目录运行，cwd 下没有 .env）
+    load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env")))
 except Exception:
     pass
 

@@ -10,6 +10,14 @@ import os
 import threading
 from dataclasses import dataclass, field
 
+# 加载项目根目录 .env（docker-compose 与后端共享同一份；密码不入库、不进 config 默认值）
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env")))
+except Exception:  # noqa: BLE001
+    pass
+
 # 轮循计数器：{scenario: int}，线程安全
 _RR_LOCK = threading.Lock()
 _ROUND_ROBIN: dict[str, int] = {}
