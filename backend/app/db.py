@@ -1,0 +1,423 @@
+# -*- coding: utf-8 -*-
+"""数据库层：asyncpg 连接池 + 建表 + 运行时设置读写
+
+方案参考本机 dragons-breath 项目：app_settings 表承载运行时可覆盖配置，
+启动时读取并 apply_overrides 到 config.settings，免重启热更新。
+"""
+import json
+import logging
+from datetime import datetime
+from typing import Any, Optional
+
+import asyncpg
+
+from .config import apply_overrides, default_ai_models, settings
+
+log = logging.getLogger("db")
+
+_pool: Optional[asyncpg.Pool] = None
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS app_settings (
+    key         TEXT PRIMARY KEY,
+    value       TEXT,
+    updated_at  TIMESTAMPTZ DEFAULT now()
+);
+
+-- 告警日志（飞书推送 / 健康检查触发）
+CREATE TABLE IF NOT EXISTS alert_log (
+    id          BIGSERIAL PRIMARY KEY,
+    level       TEXT NOT NULL DEFAULT 'info',   -- info|warning|critical
+    source      TEXT NOT NULL DEFAULT '',         -- health|feishu|vps|network|manual
+    message     TEXT NOT NULL,
+    payload     JSONB,
+    ts          TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_alert_ts ON alert_log(ts DESC);
+
+-- VPS / 代理矩阵实例配置（持久化，前端维护）
+CREATE TABLE IF NOT EXISTS vps_instances (
+    id          BIGSERIAL PRIMARY KEY,
+    name        TEXT NOT NULL,
+    host        TEXT NOT NULL,
+    port        INT NOT NULL DEFAULT 22,
+    kind        TEXT NOT NULL DEFAULT 'vps',     -- vps|proxy
+    note        TEXT,
+    enabled     BOOLEAN DEFAULT TRUE,
+    updated_at  TIMESTAMPTZ DEFAULT now()
+);
+
+-- AI Token 消耗持久化（与 dragons-breath 计费面板同构）
+CREATE TABLE IF NOT EXISTS ai_usage_log (
+    id                 BIGSERIAL PRIMARY KEY,
+    ts                 TIMESTAMPTZ NOT NULL DEFAULT now(),
+    model              TEXT NOT NULL,
+    scenario           TEXT NOT NULL DEFAULT '',
+    provider           TEXT NOT NULL DEFAULT '',
+    prompt_tokens      INT NOT NULL DEFAULT 0,
+    completion_tokens  INT NOT NULL DEFAULT 0,
+    ok                 BOOLEAN NOT NULL DEFAULT TRUE,
+    latency_ms         INT NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_ts ON ai_usage_log (ts);
+
+-- 待办记事（飞书 bot "/待办" 指令落库；AI 智能待办与经验沉淀模块复用）
+CREATE TABLE IF NOT EXISTS todos (
+    id          BIGSERIAL PRIMARY KEY,
+    content     TEXT NOT NULL,
+    done        BOOLEAN NOT NULL DEFAULT FALSE,
+    is_sys_scope INTEGER NOT NULL DEFAULT 0,   -- 1=核心系统范畴(运维/网络/NAS/VPS/Docker)
+    status      TEXT NOT NULL DEFAULT '未完成', -- 未完成|部分完成|已完成
+    suggestion  TEXT,                            -- AI 排障建议（存档）
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    done_at     TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_todos_done ON todos(done, created_at DESC);
+
+-- AI 诊断历史（诊断后存档，前端可回看 + 一键存为待办）
+CREATE TABLE IF NOT EXISTS diagnose_history (
+    id          BIGSERIAL PRIMARY KEY,
+    log_content TEXT NOT NULL,
+    result      TEXT NOT NULL,
+    model       TEXT,
+    created_at  TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_diag_ts ON diagnose_history(created_at DESC);
+
+-- 自动化剧本预设（用户保存的 n8n webhook 工作流，便于一键触发与列表管理）
+CREATE TABLE IF NOT EXISTS automation_presets (
+    id           BIGSERIAL PRIMARY KEY,
+    name         TEXT NOT NULL,
+    workflow     TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at   TIMESTAMPTZ DEFAULT now()
+);
+"""
+
+
+async def init_pool():
+    global _pool
+    if _pool:
+        return _pool
+    for attempt in range(12):
+        try:
+            _pool = await asyncpg.create_pool(
+                dsn=settings.pg_dsn, min_size=2, max_size=10,
+                command_timeout=20, timeout=10)
+            break
+        except Exception as e:
+            log.warning("连接 Postgres 失败(%d/12): %s", attempt + 1, str(e)[:100])
+            import asyncio
+            await asyncio.sleep(3)
+    if not _pool:
+        raise RuntimeError("无法连接 Postgres")
+    async with _pool.acquire() as c:
+        await c.execute(SCHEMA)
+        # 老库迁移：补全新增列（CREATE TABLE IF NOT EXISTS 不会加列）
+        for table, col, definition in (
+            ("todos", "is_sys_scope", "INTEGER NOT NULL DEFAULT 0"),
+            ("todos", "status", "TEXT NOT NULL DEFAULT '未完成'"),
+            ("todos", "suggestion", "TEXT"),
+            ("alert_log", "acknowledged", "BOOLEAN NOT NULL DEFAULT FALSE"),
+        ):
+            try:
+                await c.execute(
+                    f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {definition}")
+            except Exception as e:  # noqa: BLE001
+                log.warning("迁移列 %s.%s 失败(可忽略): %s", table, col, str(e)[:80])
+    log.info("Postgres 就绪")
+    return _pool
+
+
+async def close_pool():
+    global _pool
+    if _pool:
+        await _pool.close()
+        _pool = None
+
+
+def pool() -> asyncpg.Pool:
+    if not _pool:
+        raise RuntimeError("连接池未初始化")
+    return _pool
+
+
+async def load_runtime_settings():
+    """启动时读取 app_settings 并覆盖 config.settings；若为空则写入默认值。"""
+    async with pool().acquire() as c:
+        rows = await c.fetch("SELECT key, value FROM app_settings")
+        raw = {r["key"]: r["value"] for r in rows}
+        if not raw:
+            # 首次：写入默认模型库与基础开关，便于前端直接改
+            defaults = {
+                "ai_models": json.dumps(default_ai_models(), ensure_ascii=False),
+                "ai_active": settings.ai_active,
+                "scenario_models": json.dumps({}, ensure_ascii=False),
+                "feishu_enabled": str(settings.feishu_enabled),
+                "automation_enabled": str(settings.automation_enabled),
+                "health_check_enabled": str(settings.health_check_enabled),
+                "health_check_interval": str(settings.health_check_interval),
+                "alert_cpu_threshold": str(settings.alert_cpu_threshold),
+                "alert_ram_threshold": str(settings.alert_ram_threshold),
+                "alert_disk_threshold": str(settings.alert_disk_threshold),
+                "lan_subnet": settings.lan_subnet or "",
+                "nas_host": settings.nas_host or "",
+                "nas_port": str(settings.nas_port),
+                "tv_host": settings.tv_host or "",
+            }
+            for k, v in defaults.items():
+                await c.execute(
+                    "INSERT INTO app_settings(key, value, updated_at) VALUES($1,$2,now()) "
+                    "ON CONFLICT (key) DO NOTHING", k, v)
+            raw = defaults
+        apply_overrides(raw)
+    log.info("运行时设置已加载：ai_enabled=%s feishu_enabled=%s", settings.ai_enabled, settings.feishu_enabled)
+
+
+# ---------------- 运行时设置读写 ----------------
+async def upsert_setting(key: str, value: str):
+    async with pool().acquire() as c:
+        await c.execute(
+            """INSERT INTO app_settings(key, value, updated_at) VALUES($1,$2,now())
+               ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()""",
+            key, value)
+
+
+async def get_all_settings() -> dict:
+    async with pool().acquire() as c:
+        rows = await c.fetch("SELECT key, value FROM app_settings")
+    return {r["key"]: r["value"] for r in rows}
+
+
+# ---------------- 告警日志 ----------------
+async def save_alert(level: str, source: str, message: str, payload: dict | None = None):
+    try:
+        async with pool().acquire() as c:
+            await c.execute(
+                """INSERT INTO alert_log(level, source, message, payload)
+                   VALUES($1,$2,$3,$4)""",
+                level, source, message, json.dumps(payload or {}, ensure_ascii=False))
+    except Exception as e:
+        log.warning("写告警日志失败(忽略): %s", str(e)[:120])
+
+
+async def recent_alerts(limit: int = 50, include_ack: bool = True) -> list[dict]:
+    async with pool().acquire() as c:
+        rows = await c.fetch(
+            "SELECT id,level,source,message,payload,ts,acknowledged FROM alert_log "
+            "ORDER BY ts DESC LIMIT $1", limit)
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["ts"] = d["ts"].isoformat() if d.get("ts") else None
+        d["acknowledged"] = bool(d.get("acknowledged"))
+        if isinstance(d.get("payload"), str):
+            try:
+                d["payload"] = json.loads(d["payload"])
+            except Exception:
+                d["payload"] = {}
+        out.append(d)
+    return out
+
+
+# ---------------- VPS 实例 ----------------
+async def list_vps() -> list[dict]:
+    async with pool().acquire() as c:
+        rows = await c.fetch(
+            "SELECT id,name,host,port,kind,note,enabled,updated_at FROM vps_instances ORDER BY id")
+    return [{**dict(r), "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None}
+            for r in rows]
+
+
+async def upsert_vps(item: dict) -> int:
+    async with pool().acquire() as c:
+        if item.get("id"):
+            await c.execute(
+                """UPDATE vps_instances SET name=$2,host=$3,port=$4,kind=$5,note=$6,enabled=$7,updated_at=now()
+                   WHERE id=$1""",
+                item["id"], item["name"], item["host"], int(item.get("port", 22)),
+                item.get("kind", "vps"), item.get("note", ""), bool(item.get("enabled", True)))
+            return item["id"]
+        row = await c.fetchrow(
+            """INSERT INTO vps_instances(name,host,port,kind,note,enabled)
+               VALUES($1,$2,$3,$4,$5,$6) RETURNING id""",
+            item["name"], item["host"], int(item.get("port", 22)),
+            item.get("kind", "vps"), item.get("note", ""), bool(item.get("enabled", True)))
+        return row["id"]
+
+
+async def delete_vps(vid: int) -> bool:
+    async with pool().acquire() as c:
+        r = await c.execute("DELETE FROM vps_instances WHERE id=$1", vid)
+        return "DELETE 1" in str(r).upper()
+
+
+# ---------------- AI 用量 ----------------
+async def log_ai_usage(model: str, scenario: str, provider: str,
+                       prompt_tokens: int, completion_tokens: int, ok: bool, latency_ms: int = 0):
+    try:
+        async with pool().acquire() as c:
+            await c.execute(
+                """INSERT INTO ai_usage_log(model,scenario,provider,prompt_tokens,completion_tokens,ok,latency_ms)
+                   VALUES($1,$2,$3,$4,$5,$6,$7)""",
+                model, scenario, provider, prompt_tokens, completion_tokens, ok, latency_ms)
+    except Exception:
+        pass
+
+
+async def ai_usage_summary(days: int = 30) -> dict:
+    cutoff = datetime.now() - __import__("datetime").timedelta(days=days)
+    async with pool().acquire() as c:
+        rows = await c.fetch(
+            """SELECT date_trunc('day', ts AT TIME ZONE 'Asia/Shanghai')::date AS day,
+                      model, SUM(prompt_tokens)::bigint AS prompt_tokens,
+                      SUM(completion_tokens)::bigint AS completion_tokens,
+                      COUNT(*)::int AS calls
+               FROM ai_usage_log WHERE ts >= $1
+               GROUP BY day, model ORDER BY day DESC, calls DESC""", cutoff)
+        totals = await c.fetchrow(
+            """SELECT COALESCE(SUM(prompt_tokens),0)::bigint AS p,
+                      COALESCE(SUM(completion_tokens),0)::bigint AS c,
+                      COUNT(*)::int AS calls,
+                      COALESCE(SUM(CASE WHEN NOT ok THEN 1 ELSE 0 END)::int, 0) AS fails
+               FROM ai_usage_log WHERE ts >= $1""", cutoff)
+    return {"rows": [dict(r) for r in rows],
+            "totals": dict(totals) if totals else {"p": 0, "c": 0, "calls": 0, "fails": 0}}
+
+
+# ---------------- 待办记事（AI 智能待办与经验沉淀模块） ----------------
+def _row_to_todo(r) -> dict:
+    d = dict(r)
+    d["is_sys_scope"] = bool(d.get("is_sys_scope"))
+    d["done"] = bool(d.get("done"))
+    for k in ("created_at", "done_at"):
+        d[k] = d[k].isoformat() if d.get(k) else None
+    return d
+
+
+async def add_todo(content: str, is_sys_scope: int = 0, status: str = "未完成") -> int:
+    async with pool().acquire() as c:
+        row = await c.fetchrow(
+            "INSERT INTO todos(content, done, is_sys_scope, status) VALUES($1, FALSE, $2, $3) "
+            "RETURNING id", content, int(is_sys_scope), status)
+    return row["id"]
+
+
+async def get_todo(tid: int) -> dict | None:
+    async with pool().acquire() as c:
+        row = await c.fetchrow("SELECT * FROM todos WHERE id=$1", tid)
+    return _row_to_todo(row) if row else None
+
+
+async def list_todos(only_open: bool = True, limit: int = 100, query: str = "") -> list[dict]:
+    async with pool().acquire() as c:
+        if query:
+            like = f"%{query}%"
+            rows = await c.fetch(
+                "SELECT * FROM todos WHERE content LIKE $1 OR suggestion LIKE $1 "
+                "ORDER BY created_at DESC LIMIT $2", like, limit)
+        elif only_open:
+            rows = await c.fetch(
+                "SELECT * FROM todos WHERE NOT done ORDER BY created_at DESC LIMIT $1", limit)
+        else:
+            rows = await c.fetch(
+                "SELECT * FROM todos ORDER BY done, created_at DESC LIMIT $1", limit)
+    return [_row_to_todo(r) for r in rows]
+
+
+async def update_todo_status(tid: int, status: str) -> bool:
+    done = (status == "已完成")
+    async with pool().acquire() as c:
+        r = await c.execute(
+            "UPDATE todos SET status=$2, done=$3 WHERE id=$1", tid, status, done)
+        return "UPDATE 1" in str(r).upper()
+
+
+async def update_todo_suggestion(tid: int, suggestion: str) -> bool:
+    async with pool().acquire() as c:
+        r = await c.execute("UPDATE todos SET suggestion=$2 WHERE id=$1", tid, suggestion)
+        return "UPDATE 1" in str(r).upper()
+
+
+async def experience_corpus(limit: int = 50) -> list[dict]:
+    """取核心系统范畴且已完成或有 AI 建议的历史，供经验提炼。"""
+    async with pool().acquire() as c:
+        rows = await c.fetch(
+            "SELECT content, suggestion FROM todos "
+            "WHERE is_sys_scope=1 AND (status='已完成' OR suggestion IS NOT NULL) LIMIT $1",
+            limit)
+    return [dict(r) for r in rows]
+
+
+async def done_todo(tid: int) -> bool:
+    async with pool().acquire() as c:
+        r = await c.execute(
+            "UPDATE todos SET done=TRUE, done_at=now(), status='已完成' WHERE id=$1 AND NOT done", tid)
+        return "UPDATE 1" in str(r).upper()
+
+
+async def delete_todo(tid: int) -> bool:
+    async with pool().acquire() as c:
+        r = await c.execute("DELETE FROM todos WHERE id=$1", tid)
+        return "DELETE 1" in str(r).upper()
+
+
+# ---------------- 告警确认/删除 ----------------
+async def acknowledge_alert(aid: int) -> bool:
+    async with pool().acquire() as c:
+        r = await c.execute("UPDATE alert_log SET acknowledged=TRUE WHERE id=$1", aid)
+        return "UPDATE 1" in str(r).upper()
+
+
+async def delete_alert(aid: int) -> bool:
+    async with pool().acquire() as c:
+        r = await c.execute("DELETE FROM alert_log WHERE id=$1", aid)
+        return "DELETE 1" in str(r).upper()
+
+
+# ---------------- AI 诊断历史 ----------------
+async def add_diagnose(log_content: str, result: str, model: str | None) -> int:
+    async with pool().acquire() as c:
+        row = await c.fetchrow(
+            "INSERT INTO diagnose_history(log_content, result, model) VALUES($1,$2,$3) RETURNING id",
+            log_content, result, model)
+    return row["id"]
+
+
+async def list_diagnoses(limit: int = 50) -> list[dict]:
+    async with pool().acquire() as c:
+        rows = await c.fetch(
+            "SELECT id, log_content, result, model, created_at FROM diagnose_history "
+            "ORDER BY created_at DESC LIMIT $1", limit)
+    return [{**dict(r), "created_at": r["created_at"].isoformat() if r.get("created_at") else None}
+            for r in rows]
+
+
+# ---------------- 自动化剧本预设 ----------------
+async def add_preset(name: str, workflow: str, payload_json: str) -> int:
+    async with pool().acquire() as c:
+        row = await c.fetchrow(
+            "INSERT INTO automation_presets(name, workflow, payload_json) VALUES($1,$2,$3) RETURNING id",
+            name, workflow, payload_json)
+    return row["id"]
+
+
+async def get_preset(pid: int) -> dict | None:
+    async with pool().acquire() as c:
+        row = await c.fetchrow(
+            "SELECT id, name, workflow, payload_json FROM automation_presets WHERE id=$1", pid)
+    return dict(row) if row else None
+
+
+async def list_presets() -> list[dict]:
+    async with pool().acquire() as c:
+        rows = await c.fetch(
+            "SELECT id, name, workflow, payload_json, created_at FROM automation_presets ORDER BY id")
+    return [{**dict(r), "created_at": r["created_at"].isoformat() if r.get("created_at") else None}
+            for r in rows]
+
+
+async def delete_preset(pid: int) -> bool:
+    async with pool().acquire() as c:
+        r = await c.execute("DELETE FROM automation_presets WHERE id=$1", pid)
+        return "DELETE 1" in str(r).upper()

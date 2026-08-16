@@ -1,0 +1,65 @@
+# SysCenter 部署编排
+# 后端以本机 Windows 进程运行（backend/run.bat），故此处只编排支撑服务：
+#   - postgres / redis（后端依赖）
+#   - frontend（nginx 提供前端静态资源 + 反代 /api 到本机后端）
+# 公网入口：nginx 暴露 ${FRONTEND_PORT:-8362}，域名 syscenter.yshost.de5.net 指向宿主机该端口。
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: syscenter-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER:-syscenter}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-syscenter_pass_2026}
+      POSTGRES_DB: ${PG_DATABASE:-syscenter}
+      TZ: Asia/Shanghai
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${PG_PORT:-5442}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-syscenter} -d ${PG_DATABASE:-syscenter}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [syscenter-net]
+
+  redis:
+    image: redis:7-alpine
+    container_name: syscenter-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redisdata:/data
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6387}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks: [syscenter-net]
+
+  frontend:
+    image: nginx:1.27-alpine
+    container_name: syscenter-frontend
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - ./frontend/dist:/usr/share/nginx/html:ro
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "${FRONTEND_PORT:-8362}:80"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    networks: [syscenter-net]
+
+networks:
+  syscenter-net:
+    name: syscenter-net
+
+volumes:
+  pgdata:
+  redisdata:

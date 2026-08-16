@@ -1,0 +1,61 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  background: linear-gradient(1200px 600px at 80% -10%, #e0f2fe 0%, #f1f5f9 60%);
+  color: #0f172a;
+  font-family: ui-sans-serif, system-ui, "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+.card {
+  background: rgba(255,255,255,0.92);
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  padding: 16px;
+  box-shadow: 0 1px 3px rgba(15,23,42,0.06);
+}
+
+.btn {
+  border-radius: 10px;
+  padding: 8px 14px;
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+  color: #0f172a;
+  cursor: pointer;
+  transition: all .15s ease;
+}
+.btn:hover { border-color: #0891b2; color: #0891b2; }
+.btn-primary { background: #0891b2; color: #ffffff; border-color: #0891b2; font-weight: 600; }
+.btn-primary:hover { color: #ffffff; filter: brightness(1.05); }
+.btn-danger:hover { border-color: #dc2626; color: #dc2626; }
+
+.input {
+  width: 100%;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 8px 12px;
+  color: #0f172a;
+  outline: none;
+}
+.input:focus { border-color: #0891b2; }
+
+.tag { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid #e2e8f0; background: #f8fafc; }
+.bar { height: 8px; border-radius: 999px; background: #e2e8f0; overflow: hidden; }
+.bar > span { display: block; height: 100%; border-radius: 999px; }
+
+.nav-item { padding: 8px 12px; border-radius: 10px; cursor: pointer; color: #475569; }
+.nav-item.active { background: #ffffff; color: #0891b2; border: 1px solid #e2e8f0; box-shadow: 0 1px 2px rgba(15,23,42,0.06); }
+
+/* 亮色主题下，暗色模板里用作“次要文字”的浅灰在白底看不清，统一提一档对比度 */
+.text-gray-300 { color: #334155 !important; }
+.text-gray-400 { color: #475569 !important; }
+.text-gray-500 { color: #475569 !important; }

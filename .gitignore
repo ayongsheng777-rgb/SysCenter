@@ -1,0 +1,30 @@
+# ===== 密钥 / 环境（绝不入库）=====
+.env
+backend/data/
+*.log
+
+# ===== 构建产物（可重建）=====
+frontend/dist/
+dist/
+
+# ===== Python =====
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# ===== Node =====
+node_modules/
+.npmcache/
+.cache/
+*.tsbuildinfo
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ===== 临时 / 误写（Git-Bash 路径坑残留）=====
+/d/
+/d/WorkBuddy/

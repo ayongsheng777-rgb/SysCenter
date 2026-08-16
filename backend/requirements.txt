@@ -1,0 +1,14 @@
+# SysCenter 后端依赖（强锁版本，避免 latest 漂移）
+# 后端以本机 Windows 进程运行，依赖尽量少、尽量标准库
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+psutil==6.1.1
+pyotp==2.9.0
+httpx==0.28.1
+pydantic==2.10.4
+pydantic-settings==2.7.1
+asyncpg==0.30.0
+redis==5.2.1
+python-dotenv==1.0.1
+lark-oapi==1.7.2   # 飞书 bot 双向通讯（WebSocket 长连接，对齐 OmniCraft）
+segno==1.5.2       # 本地生成 OTP/飞书扫码二维码（纯 Python，不外发密钥）
