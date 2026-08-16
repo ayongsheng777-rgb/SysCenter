@@ -18,6 +18,9 @@ def ping(ip: str, timeout_ms: int = 800) -> Optional[float]:
     """返回往返延迟毫秒（不可达返回 None）。Windows ping -n 1 -w <ms>。"""
     if shutil.which("ping") is None:
         return None
+    # 防御性校验：拒绝含空白/Shell 元字符的主机串（虽 shell=False 不可注入，仍收紧输入）
+    if not ip or any(ch in ip for ch in " \t;&|$\"`'()<>{}\\"):
+        return None
     try:
         r = subprocess.run(
             ["ping", "-n", "1", "-w", str(timeout_ms), ip],

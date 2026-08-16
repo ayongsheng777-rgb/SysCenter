@@ -201,6 +201,16 @@ async def save_alert(level: str, source: str, message: str, payload: dict | None
         log.warning("写告警日志失败(忽略): %s", str(e)[:120])
 
 
+async def open_alert_exists(level: str, source: str, message: str) -> bool:
+    """是否存在未确认的同类告警（用于去重，避免重复刷屏）。"""
+    async with pool().acquire() as c:
+        row = await c.fetchval(
+            "SELECT 1 FROM alert_log WHERE level=$1 AND source=$2 AND message=$3 "
+            "AND acknowledged=FALSE LIMIT 1",
+            level, source, message)
+    return row is not None
+
+
 async def recent_alerts(limit: int = 50, include_ack: bool = True) -> list[dict]:
     async with pool().acquire() as c:
         rows = await c.fetch(

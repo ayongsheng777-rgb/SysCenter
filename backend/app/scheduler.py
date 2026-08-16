@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 
-from . import feishu, modules
+from . import db, feishu, modules
 from .config import settings
 
 log = logging.getLogger("scheduler")
@@ -42,9 +42,12 @@ async def _check_once():
 
     for level, source, msg in alerts:
         try:
+            # 落库（去重：同 level+source+message 未确认则跳过）+ 飞书推送
+            if not await db.open_alert_exists(level, source, msg):
+                await db.save_alert(level, source, msg)
             await feishu.notify(level, source, msg)
         except Exception as e:
-            log.warning("健康检查告警推送失败: %s", e)
+            log.warning("健康检查告警处理失败: %s", e)
 
 
 async def _loop():

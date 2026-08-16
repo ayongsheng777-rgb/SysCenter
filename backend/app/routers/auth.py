@@ -53,6 +53,9 @@ def login(body: OtpIn, request: Request):
     if rec and rec[0] >= _LOGIN_MAX_FAILS and now - rec[1] < _LOGIN_LOCK_SEC:
         wait = int(_LOGIN_LOCK_SEC - (now - rec[1]))
         raise HTTPException(status_code=429, detail=f"登录失败过多，请 {wait} 秒后再试")
+    # 输入校验：OTP 必须是 6 位数字；格式非法直接 400，且不计入限速失败（避免被恶意锁管理员）
+    if not (body.otp and isinstance(body.otp, str) and body.otp.isdigit() and len(body.otp) == 6):
+        raise HTTPException(status_code=400, detail="OTP 必须为 6 位数字")
     if not auth.verify_otp(body.otp):
         f = _LOGIN_FAILS.setdefault(ip, [0, now])
         f[0] += 1
