@@ -65,6 +65,10 @@ async def healthz():
 
 @app.on_event("startup")
 async def on_startup():
+    # 安全提醒：若仍在使用弱默认/占位密码，记录告警（生产应在 .env 设置强密码）
+    if settings.pg_password in ("syscenter_pass_2026", "ChangeMe_StrongPassw0rd!2026", ""):
+        log.warning("PG_PASSWORD 使用了默认值/弱口令或占位符，存在安全风险，"
+                    "请在生产环境通过 .env 设置强密码")
     await db.init_pool()
     await db.load_runtime_settings()
     scheduler.start()

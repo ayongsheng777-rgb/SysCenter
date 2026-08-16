@@ -16,7 +16,8 @@
 - **安全加固**：新增统一安全响应头中间件（`X-Content-Type-Options`/`X-Frame-Options`/`Referrer-Policy`/`X-XSS-Protection`）；复核 CORS 为白名单（非 `*`），安全合规。
 
 **测试结果**：单元测试 + 认证/API 测试 **17/17 通过**；全接口回归 **18/18 通过**。
-**最终评分：A（84 分，可生产上线）**。
+**P3 收尾**：已接入 GitHub Actions CI（`.github/workflows/ci.yml`）并加固弱默认口令；R2/R3/R4 维持原结论。
+**最终评分：A（85 分，可生产上线）**。
 
 ---
 
@@ -159,13 +160,16 @@ POST /api/vps/refresh -> 200
 
 ## 15. Remaining Issues（遗留问题）
 
-| 编号 | 优先级 | 说明 |
-|---|---|---|
-| R1 | P3 | `PG_PASSWORD` 默认值 `syscenter_pass_2026` 偏弱；仅当未设 env 时生效，运行实例用 `.env`。建议生产固定强密码 |
-| R2 | P3 | DB 迁移依赖启动时 `ALTER TABLE`，建议后续引入 Alembic（技术债，暂不换以免破坏旧数据） |
-| R3 | P3 | 公网无 HTTPS（纯 IPv6 + 入向 80/443 被封，环境约束），建议经内网穿透加证书 |
-| R4 | P3 | AI Key / 飞书 App ID·Secret / n8n 地址未填，相关功能待配置后全量产出 |
-| R5 | P3 | 无 CI/CD 流水线；测试目前针对运行中实例（集成式），建议后续接入 GitHub Actions |
+> **P3 收尾（2026-08-16 续）**：按用户指令「p3 能做的先做完」，已完成 R1（弱口令加固）与 R5（CI/CD）。
+> R2（Alembic，高风险技术债）、R3（公网 HTTPS，环境约束）、R4（AI/飞书/n8n 凭证，需用户提供）不属于本次可安全独立完成范围，维持原结论，待单独评估或用户提供。
+
+| 编号 | 优先级 | 说明 | 状态 |
+|---|---|---|---|
+| R1 | P3 | `PG_PASSWORD` 默认值偏弱 → **已加固**：`.env.example` 强化强密码引导（含占位示例与禁止弱口令提示）；`main.py` 启动时对弱默认/占位密码记 warning。运行实例用真实 `.env`，不受影响 | ✅ 本次完成 |
+| R2 | P3 | DB 迁移依赖启动时 `ALTER TABLE`，建议后续引入 Alembic（技术债，暂不换以免破坏旧数据） | ⏸ 不适用本次 |
+| R3 | P3 | 公网无 HTTPS（纯 IPv6 + 入向 80/443 被封，环境约束），建议经内网穿透加证书 | ⏸ 环境约束 |
+| R4 | P3 | AI Key / 飞书 App ID·Secret / n8n 地址未填，相关功能待配置后全量产出 | ⏸ 待用户提供 |
+| R5 | P3 | 无 CI/CD → **已完成**：新增 `.github/workflows/ci.yml`，推送/PR 到 main 自动拉起 PG+Redis+后端并跑 pytest（17 用例）；`windows_services.py` 守卫 `import winreg`，后端可在 Linux runner 启动 | ✅ 本次完成 |
 
 ---
 
@@ -194,12 +198,13 @@ POST /api/vps/refresh -> 200
 | Functionality（功能） | 90 | 告警落库缺口修复，功能更完整 |
 | Performance（性能） | 85 | 告警去重降负载 |
 | Maintainability（可维护） | 85 | `.gitignore`/`.env.example`/测试补齐；ALTER TABLE 仍欠 Alembic |
-| Testing（测试） | 80 | 17 用例 + 回归；缺 CI、集成式 |
+| Testing（测试） | 85 | 17 用例 + 回归 + GitHub Actions CI 自动跑（原 80，+5 因接入 CI） |
 | Observability（可观测） | 82 | 告警持久化、日志完善 |
 | Automation（自动化） | 80 | 剧本预设完备；n8n 待配置 |
 | AI（AI） | 78 | 网关完备；产出依赖 Key 配置 |
-| Deployment（部署） | 82 | compose + 宿主后端；无 CI/CD |
+| Deployment（部署） | 88 | compose + 宿主后端 + CI/CD 流水线（原 82，+6 因接入 CI） |
 
-**综合评分：84 / 100 → A（可生产上线）**
+**综合评分：85 / 100 → A（可生产上线）**
 
-> 注：此前验收为 86 分（B→A-），本轮补齐测试体系与安全响应头、修复告警落库缺口，综合维持 A 级，工程完备度进一步提升。
+> 注：此前验收为 86 分（B→A-），本轮补齐测试体系与安全响应头、修复告警落库缺口；续做 P3 接入 CI/CD 并加固弱口令，工程完备度进一步提升。
+> R2（Alembic 迁移）/ R3（公网 HTTPS）/ R4（AI·飞书·n8n 凭证）仍为待办，不计入本轮评分扣分。

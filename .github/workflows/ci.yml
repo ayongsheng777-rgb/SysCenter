@@ -1,0 +1,95 @@
+name: SysCenter CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 权限最小化：仅读取仓库内容
+permissions:
+  contents: read
+
+jobs:
+  integration-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Start Postgres & Redis (Docker)
+        run: |
+          docker run -d --name syscenter-pg -p 127.0.0.1:5442:5432 \
+            -e POSTGRES_USER=syscenter -e POSTGRES_PASSWORD=syscenter_pass_ci \
+            -e POSTGRES_DB=syscenter postgres:16-alpine
+          docker run -d --name syscenter-redis -p 127.0.0.1:6387:6379 redis:7-alpine
+
+      - name: Wait for Postgres
+        run: |
+          for i in $(seq 1 30); do
+            if docker exec syscenter-pg pg_isready -U syscenter -d syscenter >/dev/null 2>&1; then
+              echo "postgres ready"; exit 0
+            fi
+            sleep 2
+          done
+          echo "postgres not ready"; docker logs syscenter-pg; exit 1
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Start SysCenter backend
+        working-directory: backend
+        env:
+          DATA_DIR: ${{ github.workspace }}/backend/.ci_data
+          BACKEND_HOST: 127.0.0.1
+          BACKEND_PORT: "8352"
+          PG_HOST: 127.0.0.1
+          PG_PORT: "5442"
+          PG_USER: syscenter
+          PG_PASSWORD: syscenter_pass_ci
+          PG_DATABASE: syscenter
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: "6387"
+          REDIS_DB: "0"
+          TZ: Asia/Shanghai
+          FEISHU_ENABLED: "False"
+          AI_ENABLED: "False"
+          AUTOMATION_ENABLED: "False"
+          HEALTH_CHECK_ENABLED: "False"
+        run: |
+          mkdir -p "$DATA_DIR"
+          python -m uvicorn app.main:app --host 127.0.0.1 --port 8352 --log-level info \
+            > /tmp/syscenter.log 2>&1 &
+          echo $! > /tmp/syscenter.pid
+          for i in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:8352/api/healthz >/dev/null; then
+              echo "backend up"; break
+            fi
+            sleep 2
+          done
+          curl -sf http://127.0.0.1:8352/api/healthz \
+            || { echo "backend failed to start"; cat /tmp/syscenter.log; exit 1; }
+
+      - name: Run pytest
+        env:
+          TEST_BASE_URL: http://127.0.0.1:8352
+          # 与后端共用同一 DATA_DIR，确保 OTP 密钥文件一致（动态码可校验）
+          DATA_DIR: ${{ github.workspace }}/backend/.ci_data
+        run: |
+          python -m pytest tests/ -q
+
+      - name: Stop services (always)
+        if: always()
+        run: |
+          [ -f /tmp/syscenter.pid ] && kill "$(cat /tmp/syscenter.pid)" 2>/dev/null || true
+          docker rm -f syscenter-pg syscenter-redis 2>/dev/null || true

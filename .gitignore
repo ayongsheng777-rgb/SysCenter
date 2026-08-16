@@ -1,6 +1,7 @@
 # ===== 密钥 / 环境（绝不入库）=====
 .env
 backend/data/
+backend/.ci_data/
 *.log
 
 # ===== 构建产物（可重建）=====

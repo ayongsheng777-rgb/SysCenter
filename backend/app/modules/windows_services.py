@@ -8,8 +8,12 @@ import locale
 import logging
 import os
 import subprocess
-import winreg
 from typing import Optional
+
+try:
+    import winreg  # Windows 专用；非 Windows 平台（如 CI Linux runner）降级为空实现
+except ImportError:
+    winreg = None
 
 log = logging.getLogger("win_services")
 
@@ -95,6 +99,8 @@ def service_action(name: str, action: str) -> tuple[bool, str]:
 
 def registry_startup_apps() -> list[dict]:
     """扫描注册表 Run 键 + 启动文件夹，列出开机自启应用。"""
+    if winreg is None:
+        return []  # 非 Windows 平台不支持注册表扫描，安全降级为空
     items = []
     keys = [
         (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run"),
