@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
 """鉴权路由：OTP 绑定 / 登录 / 重置（换绑）
 
-安全门（对齐复刻指导 03）：
+安全门：
 - 获取绑定信息仅在未绑定时返回密钥/二维码。
-- 重置（换绑）必须同时持有【有效会话令牌】+【当前 6 位动态码】，
-  仅凭令牌可重置 = 令牌泄露即被接管绑定（实战修过的洞）。
+- 重置（换绑）必须同时持有【有效会话令牌(admin)】+【当前 6 位动态码】。
 """
 import time
-from fastapi import APIRouter, Depends, HTTPException, Request, Header
+
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from pydantic import BaseModel
 
-from .. import auth
-from ..security import require_auth
+from .. import auth, db
+from ..security import require_role
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -45,7 +45,7 @@ def setup():
 
 
 @router.post("/login")
-def login(body: OtpIn, request: Request):
+async def login(body: OtpIn, request: Request):
     """用 6 位动态码换取会话令牌。首次成功会标记已绑定。含简单失败限速。"""
     ip = request.client.host if request.client else "unknown"
     now = time.time()
@@ -63,24 +63,28 @@ def login(body: OtpIn, request: Request):
         raise HTTPException(status_code=403, detail="OTP 验证失败")
     _LOGIN_FAILS.pop(ip, None)
     auth.mark_enrolled()
-    return auth.generate_token()
+    res = auth.generate_token("admin")
+    await db.add_audit("admin", "login", ip, "OK")
+    return res
 
 
 @router.post("/reset")
-def reset(body: OtpIn, _auth: bool = Depends(require_auth)) -> ResetOut:
-    """换绑验证器：需登录态 + 当前 6 位动态码。返回新密钥+二维码，旧令牌立即失效。"""
+async def reset(body: OtpIn, _auth: str = Depends(require_role("admin"))) -> ResetOut:
+    """换绑验证器：需 admin 登录态 + 当前 6 位动态码。返回新密钥+二维码，旧令牌立即失效。"""
     if not auth.verify_otp(body.otp):
         raise HTTPException(status_code=403, detail="当前动态码校验失败")
     res = auth.reset_otp()
     if res is None:
         raise HTTPException(status_code=400, detail="环境变量 OTP_SECRET 模式下不支持重置")
+    await db.add_audit("admin", "reset_otp", "", "更换验证器")
     return ResetOut(secret=res["secret"], otpauth_uri=res["otpauth_uri"],
                    qr=res.get("qr", ""), reset=True)
 
 
 @router.post("/logout")
-def logout(authorization: str | None = Header(None)):
-    """吊销服务端会话令牌（从有效集移除），前端随后清除本地令牌。"""
+async def logout(authorization: str | None = Header(None)):
+    """吊销服务端会话令牌（从 Redis/内存移除），前端随后清除本地令牌。"""
     if authorization and authorization.lower().startswith("bearer "):
         auth.revoke_token(authorization[7:].strip())
+    await db.add_audit("admin", "logout", "", "")
     return {"ok": True}

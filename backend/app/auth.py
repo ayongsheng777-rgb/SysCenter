@@ -18,6 +18,10 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import quote
 
+import json
+
+from . import redis_client
+
 # 默认落盘到后端 data 目录（本机运行）
 _DATA_DIR_DEFAULT = os.path.join(os.path.dirname(__file__), "..", "data")
 DATA_DIR = os.environ.get("DATA_DIR", _DATA_DIR_DEFAULT)
@@ -29,7 +33,9 @@ _SECRET_FILE = os.path.join(DATA_DIR, "otp_secret")
 _ENROLLED_FILE = os.path.join(DATA_DIR, "otp_enrolled")
 _SESSION_FILE = os.path.join(DATA_DIR, "session_secret")
 
-VALID_TOKENS = set()          # 内存中的有效会话（重启即清空）
+# 有效会话：优先存 Redis（session:<token>，带 TTL），Redis 不可用时回退到这个内存 set。
+# 单进程/单用户场景下二者等价；引入 Redis 是为了支持重启保活与未来多 worker 横向扩展。
+VALID_TOKENS = set()
 _session_secret = None
 
 
@@ -143,18 +149,58 @@ def _b64d(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + pad)
 
 
-def generate_token() -> dict:
+def generate_token(role: str = "admin") -> dict:
+    """签发会话令牌并登记到 Redis（或回退内存）。role 用于 RBAC 角色判定。"""
     issued = int(time.time())
     expiry = issued + SESSION_TTL
     body = _b64u(f"{issued}.{expiry}".encode("ascii"))
     sig = hmac.new(_session_secret_get().encode(), body.encode(), hashlib.sha256).hexdigest()
     token = f"{body}.{sig}"
-    VALID_TOKENS.add(token)
-    return {"token": token, "issued": issued, "expires": expiry, "ttl": SESSION_TTL}
+    _session_store(token, role, expiry)
+    return {"token": token, "issued": issued, "expires": expiry, "ttl": SESSION_TTL, "role": role}
+
+
+def _session_store(token: str, role: str, expiry: int):
+    """登记会话到 Redis（TTL=剩余有效期），失败回退内存 set，保证后端可启动。"""
+    try:
+        r = redis_client.get_redis_sync()
+        ttl = max(int(expiry - time.time()), 1)
+        r.set(f"session:{token}", json.dumps({"role": role, "expires": expiry}), ex=ttl)
+    except Exception:  # noqa: BLE001
+        VALID_TOKENS.add(token)
+
+
+def _session_exists(token: str) -> bool:
+    try:
+        r = redis_client.get_redis_sync()
+        return r.exists(f"session:{token}") == 1
+    except Exception:  # noqa: BLE001
+        return token in VALID_TOKENS
+
+
+def _session_delete(token: str):
+    try:
+        r = redis_client.get_redis_sync()
+        r.delete(f"session:{token}")
+    except Exception:  # noqa: BLE001
+        pass
+    VALID_TOKENS.discard(token)
+
+
+def get_token_role(token: str) -> str:
+    """读取令牌绑定的角色；Redis 不可用时默认 admin。"""
+    try:
+        r = redis_client.get_redis_sync()
+        raw = r.get(f"session:{token}")
+        if raw:
+            return (json.loads(raw) or {}).get("role", "admin")
+    except Exception:  # noqa: BLE001
+        pass
+    return "admin"
 
 
 def verify_token(token: str | None) -> bool:
-    if not token or token not in VALID_TOKENS:
+    if not token:
         return False
     try:
         body, sig = token.rsplit(".", 1)
@@ -166,14 +212,16 @@ def verify_token(token: str | None) -> bool:
     if not hmac.compare_digest(exp_sig, sig):
         return False
     if int(time.time()) > expiry:
-        VALID_TOKENS.discard(token)
+        _session_delete(token)
+        return False
+    if not _session_exists(token):
         return False
     return True
 
 
 def revoke_token(token: str | None):
     if token:
-        VALID_TOKENS.discard(token)
+        _session_delete(token)
 
 
 # ==================== OTP 重置（更换验证器） ====================
@@ -186,7 +234,7 @@ def reset_otp() -> dict | None:
                 os.remove(f)
         except OSError:
             pass
-    VALID_TOKENS.clear()
+    redis_client.clear_sessions()
     raw = secrets.token_bytes(20)
     new_secret = base64.b32encode(raw).decode("ascii").rstrip("=")
     _write(_SECRET_FILE, new_secret)

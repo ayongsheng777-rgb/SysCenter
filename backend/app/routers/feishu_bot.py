@@ -10,10 +10,11 @@ from .. import db, feishu
 from ..config import apply_overrides, settings
 from ..feishu_deviceflow import FeishuDeviceFlow
 from ..qrutil import qr_data_url
-from ..security import require_auth
+from ..security import require_auth, require_role
 
 log = logging.getLogger("feishu.bot")
-router = APIRouter(prefix="/api/feishu/bot", tags=["feishu-bot"], dependencies=[Depends(require_auth)])
+router = APIRouter(prefix="/api/feishu/bot", tags=["feishu-bot"],
+                   dependencies=[Depends(require_auth), Depends(require_role("admin"))])
 
 
 @router.get("/status")
@@ -30,6 +31,7 @@ async def bot_restart():
     except RuntimeError:
         loop = asyncio.new_event_loop()
     await feishu.feishu_service.restart(loop)
+    await db.add_audit("admin", "feishu_restart", "", "")
     return {"ok": True, "status": feishu.feishu_service.status()}
 
 
@@ -67,6 +69,7 @@ async def feishu_device_qrcode_status(token: str = Query(...)):
         for k, v in changed.items():
             await db.upsert_setting(k, json.dumps(v, ensure_ascii=False))
         apply_overrides(changed)
+        await db.add_audit("admin", "feishu_config", changed["feishu_app_id"][:10], "扫码配置成功")
         log.info("飞书扫码配置成功 (app_id=%s…)，启动 Bot", changed["feishu_app_id"][:10])
         try:
             feishu.start_feishu_bot()

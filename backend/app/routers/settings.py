@@ -11,9 +11,10 @@ from pydantic import BaseModel
 from .. import db, feishu
 from ..config import (SECRET_KEYS, apply_overrides, mask_secret, runtime_dict,
                       settings)
-from ..security import require_auth
+from ..security import require_auth, require_role
 
-router = APIRouter(prefix="/api/settings", tags=["settings"], dependencies=[Depends(require_auth)])
+router = APIRouter(prefix="/api/settings", tags=["settings"],
+                   dependencies=[Depends(require_auth), Depends(require_role("admin"))])
 
 _MASK = "****"
 
@@ -54,6 +55,7 @@ async def put_settings(body: SettingsIn):
             continue
         await db.upsert_setting(k, str(v) if not isinstance(v, str) else v)
     apply_overrides(raw)
+    await db.add_audit("admin", "settings_update", "", "更新运行时设置")
     # 飞书 bot 热启动：凭据补全且启用、但当前未运行时，保存后自动拉起（免重启）
     if settings.feishu_enabled and settings.feishu_app_id and settings.feishu_app_secret:
         svc = feishu.feishu_service

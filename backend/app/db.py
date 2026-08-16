@@ -15,6 +15,7 @@ from typing import Any, Optional
 import asyncpg
 
 from .config import apply_overrides, default_ai_models, settings
+from .request_ctx import get_client_ip, get_request_id
 
 log = logging.getLogger("db")
 
@@ -95,6 +96,19 @@ CREATE TABLE IF NOT EXISTS automation_presets (
     payload_json TEXT NOT NULL DEFAULT '{}',
     created_at   TIMESTAMPTZ DEFAULT now()
 );
+
+-- 操作审计日志（登录/登出/改设置/启停服务等高风险动作留痕）
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          BIGSERIAL PRIMARY KEY,
+    ts          TIMESTAMPTZ DEFAULT now(),
+    actor       TEXT NOT NULL DEFAULT 'admin',
+    action      TEXT NOT NULL,
+    target      TEXT NOT NULL DEFAULT '',
+    detail      TEXT NOT NULL DEFAULT '',
+    ip          TEXT NOT NULL DEFAULT '',
+    request_id  TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts DESC);
 """
 
 
@@ -456,3 +470,30 @@ async def delete_preset(pid: int) -> bool:
     async with pool().acquire() as c:
         r = await c.execute("DELETE FROM automation_presets WHERE id=$1", pid)
         return "DELETE 1" in str(r).upper()
+
+
+# ---------------- 操作审计日志 ----------------
+async def add_audit(actor: str = "admin", action: str = "", target: str = "", detail: str = "",
+                    ip: str | None = None, request_id: str | None = None):
+    """记录一次高风险操作（最佳努力，失败仅告警不阻断业务）。
+
+    ip / request_id 缺省时从请求上下文（中间件设置的 contextvar）取。
+    """
+    try:
+        async with pool().acquire() as c:
+            await c.execute(
+                """INSERT INTO audit_log(actor, action, target, detail, ip, request_id)
+                   VALUES($1,$2,$3,$4,$5,$6)""",
+                actor, action, target, detail,
+                ip if ip is not None else get_client_ip(),
+                request_id if request_id is not None else get_request_id())
+    except Exception as e:  # noqa: BLE001
+        log.warning("写审计日志失败(忽略): %s", str(e)[:120])
+
+
+async def recent_audits(limit: int = 200) -> list[dict]:
+    async with pool().acquire() as c:
+        rows = await c.fetch(
+            "SELECT id, ts, actor, action, target, detail, ip, request_id "
+            "FROM audit_log ORDER BY ts DESC LIMIT $1", limit)
+    return [{**dict(r), "ts": r["ts"].isoformat() if r.get("ts") else None} for r in rows]

@@ -33,15 +33,16 @@ import Settings from './components/Settings.vue'
 import Automation from './components/Automation.vue'
 import Alerts from './components/Alerts.vue'
 import TodoExperience from './components/TodoExperience.vue'
+import Audit from './components/Audit.vue'
 
 const tabs = [
   { key: '', label: '概览' }, { key: 'network', label: '网络/资产' },
   { key: 'vps', label: 'VPS矩阵' }, { key: 'services', label: '服务' },
   { key: 'diagnose', label: 'AI诊断' }, { key: 'automation', label: '自动化' },
   { key: 'alerts', label: '告警' }, { key: 'todos', label: '待办/经验' },
-  { key: 'settings', label: '设置' },
+  { key: 'audit', label: '审计' }, { key: 'settings', label: '设置' },
 ]
-const map = { '': Health, network: Network, vps: Vps, services: Services, diagnose: Diagnose, automation: Automation, alerts: Alerts, todos: TodoExperience, settings: Settings }
+const map = { '': Health, network: Network, vps: Vps, services: Services, diagnose: Diagnose, automation: Automation, alerts: Alerts, todos: TodoExperience, audit: Audit, settings: Settings }
 
 const route = ref(location.hash.replace('#/', '') || '')
 const loggedIn = ref(!!getToken())

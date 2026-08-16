@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 from .. import ai_client, db
 from ..config import settings
-from ..security import require_auth
+from ..security import require_auth, require_role
 
 router = APIRouter(prefix="/api/ai", tags=["ai"], dependencies=[Depends(require_auth)])
 
@@ -22,7 +22,7 @@ _SYSTEM = (
 )
 
 
-@router.post("/diagnose")
+@router.post("/diagnose", dependencies=[Depends(require_role("admin"))])
 async def diagnose(req: LogRequest):
     if not settings.ai_enabled:
         raise HTTPException(status_code=400, detail="AI 未启用，请在设置中开启并填写 API Key")
@@ -39,6 +39,7 @@ async def diagnose(req: LogRequest):
         await db.add_diagnose(req.log_content, result, model)
     except Exception as e:  # noqa: BLE001
         log.warning("诊断历史写入失败(忽略): %s", e)
+    await db.add_audit("admin", "ai_diagnose", model, f"scenario={req.scenario}")
     return {"result": result, "model": model}
 
 

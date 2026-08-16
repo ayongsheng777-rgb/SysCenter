@@ -5,10 +5,12 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from .. import db
 from ..modules import system_health, windows_services
-from ..security import require_auth
+from ..security import require_auth, require_role
 
-router = APIRouter(prefix="/api/system", tags=["system"], dependencies=[Depends(require_auth)])
+router = APIRouter(prefix="/api/system", tags=["system"],
+                   dependencies=[Depends(require_auth), Depends(require_role("admin"))])
 
 
 @router.get("/health")
@@ -39,6 +41,7 @@ async def service_action(name: str, body: ServiceAction):
     ok, msg = await asyncio.to_thread(windows_services.service_action, name, body.action)
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
+    await db.add_audit("admin", "service_action", name, body.action)
     return {"ok": True, "message": msg}
 
 

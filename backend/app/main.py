@@ -6,13 +6,18 @@
 """
 import logging
 import os
+import uuid
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.responses import JSONResponse
 
 from . import auth, db, feishu, scheduler
 from .config import settings
-from .routers import (ai, alerts, auth as auth_router, automation, feishu_bot,
+from .request_ctx import get_request_id, set_request_context
+from .routers import (ai, alerts, audit, auth as auth_router, automation, feishu_bot,
                       modules, network, notify, settings as settings_router, system, todos, vps)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -38,6 +43,17 @@ app.add_middleware(
 
 
 @app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """生成/透传 X-Request-ID，并写入请求上下文（供审计与日志使用）。"""
+    rid = request.headers.get("X-Request-ID") or uuid.uuid4().hex
+    client_ip = request.client.host if request.client else ""
+    set_request_context(rid, client_ip)
+    resp = await call_next(request)
+    resp.headers["X-Request-ID"] = rid
+    return resp
+
+
+@app.middleware("http")
 async def security_headers(request, call_next):
     """统一安全响应头（无 HTTPS 故不加 HSTS）。"""
     resp = await call_next(request)
@@ -48,8 +64,46 @@ async def security_headers(request, call_next):
     return resp
 
 # 路由注册
-for r in (auth_router, system, network, vps, modules, ai, notify, settings_router, automation, alerts, feishu_bot, todos):
+for r in (auth_router, system, network, vps, modules, ai, notify, settings_router, automation, alerts, feishu_bot, todos, audit):
     app.include_router(r.router)
+
+
+# ============== 统一异常处理：错误统一返回 {success,code,message,request_id} ==============
+_ERR_CODE_MAP = {
+    401: "AUTH_REQUIRED",
+    403: "FORBIDDEN",
+    404: "NOT_FOUND",
+    409: "CONFLICT",
+    422: "VALIDATION_ERROR",
+    429: "RATE_LIMITED",
+    500: "INTERNAL_ERROR",
+}
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_exc_handler(request: Request, exc: StarletteHTTPException):
+    code = _ERR_CODE_MAP.get(exc.status_code, f"HTTP_{exc.status_code}")
+    return JSONResponse(status_code=exc.status_code, content={
+        "success": False, "code": code, "message": str(exc.detail),
+        "request_id": get_request_id()})
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_exc_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(status_code=422, content={
+        "success": False, "code": "VALIDATION_ERROR",
+        "message": "请求参数校验失败",
+        "request_id": get_request_id(),
+        "errors": exc.errors()})
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exc_handler(request: Request, exc: Exception):
+    log.exception("未处理的异常: %s", exc)
+    return JSONResponse(status_code=500, content={
+        "success": False, "code": "INTERNAL_ERROR",
+        "message": "服务器内部错误",
+        "request_id": get_request_id()})
 
 
 @app.get("/api/ping")

@@ -9,9 +9,10 @@ from pydantic import BaseModel
 
 from .. import db
 from ..config import settings
-from ..security import require_auth
+from ..security import require_auth, require_role
 
-router = APIRouter(prefix="/api/automation", tags=["automation"], dependencies=[Depends(require_auth)])
+router = APIRouter(prefix="/api/automation", tags=["automation"],
+                   dependencies=[Depends(require_auth), Depends(require_role("admin"))])
 
 
 class TriggerIn(BaseModel):
@@ -34,6 +35,7 @@ async def save_preset(body: PresetIn):
         raise HTTPException(status_code=400, detail="workflow 不能为空")
     pid = await db.add_preset(body.name.strip(), body.workflow.strip(),
                               json.dumps(body.payload or {}, ensure_ascii=False))
+    await db.add_audit("admin", "automation_preset_save", str(pid), body.name.strip())
     return {"ok": True, "id": pid}
 
 
@@ -47,6 +49,7 @@ async def remove_preset(pid: int):
     ok = await db.delete_preset(pid)
     if not ok:
         raise HTTPException(status_code=404, detail="预设不存在")
+    await db.add_audit("admin", "automation_preset_delete", str(pid))
     return {"ok": True}
 
 
@@ -84,6 +87,7 @@ async def trigger(body: TriggerIn):
             await db.save_alert("info", "automation",
                                 f"触发 n8n 工作流 {label} -> HTTP {r.status_code}",
                                 {"url": url, "status": r.status_code})
+            await db.add_audit("admin", "automation_trigger", label, f"HTTP {r.status_code}")
             return {"ok": ok, "status": r.status_code, "body": (r.text[:500] if r.content else "")}
     except Exception as e:
         await db.save_alert("warning", "automation",

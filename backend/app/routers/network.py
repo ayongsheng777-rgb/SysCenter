@@ -5,9 +5,10 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from .. import db
 from ..modules import system_health, net_probe
 from ..config import settings
-from ..security import require_auth
+from ..security import require_auth, require_role
 
 router = APIRouter(prefix="/api/network", tags=["network"], dependencies=[Depends(require_auth)])
 
@@ -22,13 +23,14 @@ class LanScanIn(BaseModel):
     timeout_ms: int = 800
 
 
-@router.post("/lan-scan")
+@router.post("/lan-scan", dependencies=[Depends(require_role("admin"))])
 async def lan_scan(body: LanScanIn):
     """扫描局域网在线设备。"""
     subnet = body.subnet or settings.lan_subnet
     if not subnet:
         raise HTTPException(status_code=400, detail="未提供网段，请在设置中配置 LAN_SUBNET")
     hosts = await asyncio.to_thread(net_probe.scan_subnet, subnet, body.timeout_ms)
+    await db.add_audit("admin", "lan_scan", subnet, f"count={len(hosts)}")
     return {"subnet": subnet, "count": len(hosts), "hosts": hosts}
 
 
