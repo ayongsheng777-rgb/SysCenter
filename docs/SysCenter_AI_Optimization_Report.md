@@ -16,7 +16,7 @@
 - **安全加固**：新增统一安全响应头中间件（`X-Content-Type-Options`/`X-Frame-Options`/`Referrer-Policy`/`X-XSS-Protection`）；复核 CORS 为白名单（非 `*`），安全合规。
 
 **测试结果**：单元测试 + 认证/API 测试 **17/17 通过**；全接口回归 **18/18 通过**。
-**P3 收尾**：已接入 GitHub Actions CI（`.github/workflows/ci.yml`）并加固弱默认口令；R2/R3/R4 维持原结论。
+**P3 收尾**：已接入 GitHub Actions CI（`.github/workflows/ci.yml`）并加固弱默认口令；**R2（Alembic 版本化迁移）已落地**（启动时优先跑 `alembic upgrade head`，失败回退内联建表，幂等、保留既有数据）；R3/R4 维持原结论。
 **最终评分：A（85 分，可生产上线）**。
 
 ---
@@ -96,7 +96,7 @@
 
 - **新增读取函数** `db.open_alert_exists(level, source, message)`（SELECT 1 ... AND acknowledged=FALSE LIMIT 1）。
 - **未修改任何表结构**，完全兼容旧数据；`alert_log` 表早已存在 `acknowledged` 列（此前迁移脚本已加）。
-- 注：当前 DB 迁移仍依赖启动时 `ALTER TABLE`（协议 §14 建议 Alembic），属技术债，本轮未强行替换以免破坏旧数据（见 §16）。
+- **DB 迁移机制升级（R2）**：引入 Alembic 版本化迁移（`backend/alembic.ini` + `backend/migrations/`）。`init_pool` 启动时优先执行 `alembic upgrade head`（经 `asyncio.to_thread`，用 psycopg2 同步驱动连同一 Postgres，DB 地址由 `config.settings.pg_dsn` 读取、密码不入库）；失败则回退到内联 `SCHEMA` + `ALTER TABLE ADD COLUMN IF NOT EXISTS`，保证后端仍可启动。首版迁移 `0001_initial` 全量 `CREATE TABLE IF NOT EXISTS` + 补齐历史列，幂等、不破坏既有数据。
 
 ---
 
@@ -160,13 +160,13 @@ POST /api/vps/refresh -> 200
 
 ## 15. Remaining Issues（遗留问题）
 
-> **P3 收尾（2026-08-16 续）**：按用户指令「p3 能做的先做完」，已完成 R1（弱口令加固）与 R5（CI/CD）。
-> R2（Alembic，高风险技术债）、R3（公网 HTTPS，环境约束）、R4（AI/飞书/n8n 凭证，需用户提供）不属于本次可安全独立完成范围，维持原结论，待单独评估或用户提供。
+> **P3 收尾（2026-08-16 续）**：按用户指令「p3 能做的先做完」，已完成 R1（弱口令加固）、R2（Alembic 版本化迁移）、R5（CI/CD）。
+> R2 经用户二次确认（当前数据量小、是最佳窗口）后落地：引入 Alembic 并保留内联建表兜底，幂等、不破坏既有数据。R3（公网 HTTPS，环境约束）、R4（AI/飞书/n8n 凭证，需用户提供）维持原结论。
 
 | 编号 | 优先级 | 说明 | 状态 |
 |---|---|---|---|
 | R1 | P3 | `PG_PASSWORD` 默认值偏弱 → **已加固**：`.env.example` 强化强密码引导（含占位示例与禁止弱口令提示）；`main.py` 启动时对弱默认/占位密码记 warning。运行实例用真实 `.env`，不受影响 | ✅ 本次完成 |
-| R2 | P3 | DB 迁移依赖启动时 `ALTER TABLE`，建议后续引入 Alembic（技术债，暂不换以免破坏旧数据） | ⏸ 不适用本次 |
+| R2 | P3 | DB 迁移依赖启动时 `ALTER TABLE`，建议引入 Alembic → **已完成**：新增 `backend/alembic.ini` + `backend/migrations/`（env.py 从 `config.settings.pg_dsn` 读库地址、密码不入库；首版 `0001_initial` 全量建表 + 补齐历史列，幂等）；`init_pool` 优先跑 `alembic upgrade head`，失败回退内联建表 | ✅ 本次完成 |
 | R3 | P3 | 公网无 HTTPS（纯 IPv6 + 入向 80/443 被封，环境约束），建议经内网穿透加证书 | ⏸ 环境约束 |
 | R4 | P3 | AI Key / 飞书 App ID·Secret / n8n 地址未填，相关功能待配置后全量产出 | ⏸ 待用户提供 |
 | R5 | P3 | 无 CI/CD → **已完成**：新增 `.github/workflows/ci.yml`，推送/PR 到 main 自动拉起 PG+Redis+后端并跑 pytest（17 用例）；`windows_services.py` 守卫 `import winreg`，后端可在 Linux runner 启动 | ✅ 本次完成 |
@@ -175,7 +175,7 @@ POST /api/vps/refresh -> 200
 
 ## 16. Technical Debt（技术债）
 
-- **DB 迁移**：运行时 `ALTER TABLE` 自动迁移（非 Alembic），不利于版本化与回滚。
+- **DB 迁移**：已引入 Alembic 版本化迁移（R2 完成）；历史 `ALTER TABLE` 逻辑保留为 `init_pool` 的失败回退兜底，不影响正常路径。
 - **测试形态**：当前为"针对运行中服务"的集成式测试，未做 DB 快照/事务回滚；依赖实时 PG/Redis。
 - **配置即代码**：部分阈值/开关散落在 `config.py` 默认值，建议统一经 `app_settings` 表管理（已有基础）。
 
@@ -184,7 +184,7 @@ POST /api/vps/refresh -> 200
 ## 17. Risk Assessment（风险评估）
 
 - **本次改动风险**：均为低风险增量，无表结构变更、无 API 破坏性变更、无技术栈更换、无功能删除。
-- **回滚方案**：所有改动集中在 5 个后端文件 + 新增 `.env.example`/`tests/`；若需回滚，`git revert` 对应提交即可，数据库无需迁移回退。
+- **回滚方案**：本轮改动为后端 1 个文件（`db.py`）+ 新增 Alembic 脚手架（`alembic.ini`/`migrations/`）+ `requirements.txt` 加 3 个依赖；若需回滚，`git revert` 对应提交即可。`alembic_version` 表仍会残留（无害），回退后 `init_pool` 自动走内联建表兜底，数据库无需手工迁移。
 - **运行态**：后端已用新代码重启并验证；前端本轮未改动，沿用已验证亮色主题产物。
 
 ---
@@ -197,14 +197,14 @@ POST /api/vps/refresh -> 200
 | Stability（稳定） | 88 | 健康检查闭环、异步实现稳健 |
 | Functionality（功能） | 90 | 告警落库缺口修复，功能更完整 |
 | Performance（性能） | 85 | 告警去重降负载 |
-| Maintainability（可维护） | 85 | `.gitignore`/`.env.example`/测试补齐；ALTER TABLE 仍欠 Alembic |
+| Maintainability（可维护） | 88 | `.gitignore`/`.env.example`/测试补齐 + Alembic 版本化迁移落地（原 85，+3 因 R2 清除技术债） |
 | Testing（测试） | 85 | 17 用例 + 回归 + GitHub Actions CI 自动跑（原 80，+5 因接入 CI） |
 | Observability（可观测） | 82 | 告警持久化、日志完善 |
 | Automation（自动化） | 80 | 剧本预设完备；n8n 待配置 |
 | AI（AI） | 78 | 网关完备；产出依赖 Key 配置 |
 | Deployment（部署） | 88 | compose + 宿主后端 + CI/CD 流水线（原 82，+6 因接入 CI） |
 
-**综合评分：85 / 100 → A（可生产上线）**
+**综合评分：85 / 100 → A（可生产上线）**（可维护性 +3，Alembic 技术债已清除；维度均值约 85.4 取整为 85）
 
-> 注：此前验收为 86 分（B→A-），本轮补齐测试体系与安全响应头、修复告警落库缺口；续做 P3 接入 CI/CD 并加固弱口令，工程完备度进一步提升。
+> 注：此前验收为 86 分（B→A-），本轮补齐测试体系与安全响应头、修复告警落库缺口；续做 P3 接入 CI/CD、加固弱口令、引入 Alembic 版本化迁移，工程完备度进一步提升。R2/R3/R4 中 R2 已清，R3/R4 仍为待办。
 > R2（Alembic 迁移）/ R3（公网 HTTPS）/ R4（AI·飞书·n8n 凭证）仍为待办，不计入本轮评分扣分。

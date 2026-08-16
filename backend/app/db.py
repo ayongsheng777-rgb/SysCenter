@@ -4,8 +4,11 @@
 方案参考本机 dragons-breath 项目：app_settings 表承载运行时可覆盖配置，
 启动时读取并 apply_overrides 到 config.settings，免重启热更新。
 """
+import asyncio
 import json
 import logging
+import os
+import sys
 from datetime import datetime
 from typing import Any, Optional
 
@@ -95,6 +98,24 @@ CREATE TABLE IF NOT EXISTS automation_presets (
 """
 
 
+def _run_alembic_upgrade() -> None:
+    """同步执行 Alembic 迁移到 head（由 asyncio.to_thread 调用）。
+
+    数据库地址从 app.config.settings 读取，密码不硬编码。失败时抛出异常，
+    由调用方回退到内联建表，保证后端仍可启动。
+    """
+    from alembic import command
+    from alembic.config import Config
+
+    backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ini_path = os.path.join(backend_dir, "alembic.ini")
+    cfg = Config(ini_path)
+    cfg.set_main_option("script_location", os.path.join(backend_dir, "migrations"))
+    if backend_dir not in sys.path:
+        sys.path.insert(0, backend_dir)
+    command.upgrade(cfg, "head")
+
+
 async def init_pool():
     global _pool
     if _pool:
@@ -107,24 +128,28 @@ async def init_pool():
             break
         except Exception as e:
             log.warning("连接 Postgres 失败(%d/12): %s", attempt + 1, str(e)[:100])
-            import asyncio
             await asyncio.sleep(3)
     if not _pool:
         raise RuntimeError("无法连接 Postgres")
-    async with _pool.acquire() as c:
-        await c.execute(SCHEMA)
-        # 老库迁移：补全新增列（CREATE TABLE IF NOT EXISTS 不会加列）
-        for table, col, definition in (
-            ("todos", "is_sys_scope", "INTEGER NOT NULL DEFAULT 0"),
-            ("todos", "status", "TEXT NOT NULL DEFAULT '未完成'"),
-            ("todos", "suggestion", "TEXT"),
-            ("alert_log", "acknowledged", "BOOLEAN NOT NULL DEFAULT FALSE"),
-        ):
-            try:
-                await c.execute(
-                    f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {definition}")
-            except Exception as e:  # noqa: BLE001
-                log.warning("迁移列 %s.%s 失败(可忽略): %s", table, col, str(e)[:80])
+    # 版本化迁移优先（Alembic）；失败时回退内联建表，保证后端可启动
+    try:
+        await asyncio.to_thread(_run_alembic_upgrade)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Alembic 迁移失败，回退内联建表: %s", str(e)[:200])
+        async with _pool.acquire() as c:
+            await c.execute(SCHEMA)
+            # 老库迁移：补全新增列（CREATE TABLE IF NOT EXISTS 不会加列）
+            for table, col, definition in (
+                ("todos", "is_sys_scope", "INTEGER NOT NULL DEFAULT 0"),
+                ("todos", "status", "TEXT NOT NULL DEFAULT '未完成'"),
+                ("todos", "suggestion", "TEXT"),
+                ("alert_log", "acknowledged", "BOOLEAN NOT NULL DEFAULT FALSE"),
+            ):
+                try:
+                    await c.execute(
+                        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {definition}")
+                except Exception as ex:  # noqa: BLE001
+                    log.warning("迁移列 %s.%s 失败(可忽略): %s", table, col, str(ex)[:80])
     log.info("Postgres 就绪")
     return _pool
 

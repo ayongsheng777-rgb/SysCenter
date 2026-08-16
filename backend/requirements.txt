@@ -12,3 +12,9 @@ redis==5.2.1
 python-dotenv==1.0.1
 lark-oapi==1.7.2   # 飞书 bot 双向通讯（WebSocket 长连接，对齐 OmniCraft）
 segno==1.5.2       # 本地生成 OTP/飞书扫码二维码（纯 Python，不外发密钥）
+
+# 数据库版本化迁移（Alembic）。迁移阶段用 psycopg2 同步驱动连接同一 Postgres，
+# 运行时连接池仍用 asyncpg；二者共用 config.settings.pg_dsn，密码不入库、不硬编码。
+alembic==1.14.0
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.10
