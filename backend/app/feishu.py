@@ -296,6 +296,24 @@ class FeishuService:
                                  "chat_id")
             return
 
+        # ===== 笔记 / API Key =====
+        low = text.lower()
+        for kw in ("存key", "存 key", "存api", "存 api", "savekey", "save key"):
+            if low.startswith(kw):
+                await self._cmd_save_key(chat_id, text[len(kw):].strip(" ：:　"))
+                return
+        for kw in ("记笔记", "存笔记"):
+            if text.startswith(kw):
+                await self._cmd_save_note(chat_id, text[len(kw):].strip(" ：:　"))
+                return
+        for kw in ("查笔记", "找笔记", "查key", "查 key", "找key"):
+            if low.startswith(kw):
+                await self._cmd_find_note(chat_id, text[len(kw):].strip(" ：:　"))
+                return
+        if text in ("笔记列表", "笔记", "notelist", "notes"):
+            await self._cmd_note_list(chat_id)
+            return
+
         # 其余任意文字 → 转发给 AI（DeepSeek）
         await self._cmd_ai(chat_id, text)
 
@@ -374,19 +392,159 @@ class FeishuService:
             return
         try:
             from . import ai_client
-            system = ("你是 SysCenter 的系统管理助手，回答要简洁、用中文、面向个人服务器/运维场景。"
-                      "如果用户问的是操作类问题，给出可执行的步骤。")
-            reply = await ai_client.chat(system, text, max_tokens=1500, temperature=0.6, timeout=60.0)
+            system = (
+                "你是 SysCenter 的系统管理助手，回答要简洁、用中文、面向个人服务器/运维场景。"
+                "如果用户想让你【保存/记录】某条信息（例如 API Key、密钥、账号、技术排障经验、配置片段），"
+                "不要口头答应，严格输出一个 JSON 对象（不要带任何多余文字、不要 markdown 围栏）：\n"
+                '{"action":"save_note","title":"<简短标题>","category":"apikey|tech|other",'
+                '"provider":"siliconflow|deepseek|openai|空","content":"<用户给出的完整原文，不得改动或补全>"}\n'
+                "category 判断：API Key/密钥/Token → apikey；技术经验/排障步骤 → tech；其它 → other。\n"
+                "provider 仅 apikey 时填服务商（siliconflow/deepseek/openai），不确定就留空字符串。\n"
+                "如果用户不是想保存信息，就正常直接回答（纯文本，不要输出 JSON）。"
+            )
+            reply = await ai_client.chat(system, text, max_tokens=1500, temperature=0.3, timeout=60.0)
         except Exception as e:  # noqa: BLE001
             reply = None
             log.warning("[feishu] AI 中转失败：%s", e)
         if not reply:
             await self.send_text(chat_id, "⚠️ AI 调用失败或未返回内容（检查 AI Key / 代理）。", "chat_id")
             return
+        # 识别「存笔记」意图：AI 若回了 save_note JSON，则执行落库
+        try:
+            from . import ai_client as _ac
+            intent = _ac._extract_json(reply)
+        except Exception:  # noqa: BLE001
+            intent = None
+        if isinstance(intent, dict) and intent.get("action") == "save_note":
+            await self._exec_save_note(chat_id, intent)
+            return
         # 飞书单条文本上限保护
         if len(reply) > 3000:
             reply = reply[:3000] + "\n…（内容过长已截断）"
         await self.send_text(chat_id, f"🤖 {reply}", "chat_id")
+
+    # ---------------- 笔记 / API Key 指令实现 ----------------
+    @staticmethod
+    def _mask_key(key: str) -> str:
+        key = (key or "").strip()
+        return (key[:8] + "…" + key[-4:]) if len(key) > 12 else "•••"
+
+    async def _cmd_save_key(self, chat_id: str, arg: str) -> None:
+        arg = (arg or "").strip().strip('"').strip("'").strip()
+        if not arg:
+            await self.send_text(chat_id,
+                                 "用法：`存key <服务商> <key>`\n服务商可选 siliconflow/deepseek/openai（可省略，自动识别）",
+                                 "chat_id")
+            return
+        provider, key = "", arg
+        parts = arg.split(None, 1)
+        _alias = {"siliconflow": "siliconflow", "deepseek": "deepseek", "openai": "openai",
+                  "硅基流动": "siliconflow", "硅基": "siliconflow", "other": "other"}
+        if len(parts) == 2 and parts[0].lower() in _alias:
+            provider = _alias[parts[0].lower()]
+            key = parts[1].strip().strip('"').strip("'").strip()
+        if not key:
+            await self.send_text(chat_id, "用法：`存key <服务商> <key>`", "chat_id")
+            return
+        try:
+            from .routers import notes
+            note = await notes.save_api_key_note(key, provider=provider, title="飞书存 API Key")
+        except Exception as e:  # noqa: BLE001
+            log.warning("[feishu] 存 key 失败：%s", e)
+            await self.send_text(chat_id, f"⚠️ 保存失败：{type(e).__name__}", "chat_id")
+            return
+        if not note:
+            await self.send_text(chat_id, "⚠️ 未识别到有效 Key", "chat_id")
+            return
+        state = ("✅ 有效" if note["tested"] == "ok"
+                 else "❌ 无效" if note["tested"] == "fail" else "⚠️ 未验证")
+        await self.send_text(chat_id,
+                             f"🔑 已保存 API Key（#{note['id']}）\n服务商：{note['provider']}\n"
+                             f"Key：{self._mask_key(key)}\n可用性：{state} — {note['test_result']}",
+                             "chat_id")
+
+    async def _cmd_save_note(self, chat_id: str, arg: str) -> None:
+        content = (arg or "").strip()
+        if not content:
+            await self.send_text(chat_id, "用法：`记笔记 <内容>`", "chat_id")
+            return
+        title = content[:20] + ("…" if len(content) > 20 else "")
+        try:
+            nid = await db.add_note(title, "tech", "", content, [], tested="untested", test_result="")
+        except Exception as e:  # noqa: BLE001
+            await self.send_text(chat_id, f"⚠️ 保存失败：{type(e).__name__}", "chat_id")
+            return
+        await self.send_text(chat_id, f"📝 已保存笔记 #{nid}：{title}", "chat_id")
+
+    async def _cmd_find_note(self, chat_id: str, arg: str) -> None:
+        q = (arg or "").strip()
+        if not q:
+            await self.send_text(chat_id, "用法：`查笔记 <关键词>`", "chat_id")
+            return
+        try:
+            notes = await db.list_notes(q=q, limit=10)
+        except Exception as e:  # noqa: BLE001
+            await self.send_text(chat_id, f"⚠️ 检索失败：{type(e).__name__}", "chat_id")
+            return
+        if not notes:
+            await self.send_text(chat_id, f"🔍 没有找到与「{q}」相关的笔记。", "chat_id")
+            return
+        lines = [f"🔍 命中 {len(notes)} 条："]
+        for n in notes:
+            c = n["content"] or ""
+            c = self._mask_key(c) if n["category"] == "apikey" else c[:60] + ("…" if len(c) > 60 else "")
+            state = {"ok": "✅", "fail": "❌"}.get(n["tested"], "·")
+            lines.append(f"#{n['id']} [{n['category']}] {n['title']} {state}\n    {c}")
+        await self.send_text(chat_id, "\n".join(lines), "chat_id")
+
+    async def _cmd_note_list(self, chat_id: str) -> None:
+        try:
+            notes = await db.list_notes(limit=20)
+        except Exception as e:  # noqa: BLE001
+            await self.send_text(chat_id, f"⚠️ 读取失败：{type(e).__name__}", "chat_id")
+            return
+        if not notes:
+            await self.send_text(chat_id, "📝 暂无笔记。用「存key <key>」或「记笔记 <内容>」添加。", "chat_id")
+            return
+        lines = [f"📝 已存 {len(notes)} 条笔记（最新在前）："]
+        for n in notes:
+            lines.append(f"#{n['id']} [{n['category']}] {n['title']}")
+        lines.append("\n查详情：`查笔记 <关键词>`")
+        await self.send_text(chat_id, "\n".join(lines), "chat_id")
+
+    async def _exec_save_note(self, chat_id: str, intent: dict) -> None:
+        title = (intent.get("title") or "").strip() or "笔记"
+        category = intent.get("category") or "other"
+        if category not in ("apikey", "tech", "other"):
+            category = "other"
+        content = (intent.get("content") or "").strip()
+        provider = (intent.get("provider") or "").strip()
+        if not content:
+            await self.send_text(chat_id, "⚠️ 想保存但没拿到内容，请把要保存的信息再发一次。", "chat_id")
+            return
+        if category == "apikey":
+            try:
+                from .routers import notes
+                note = await notes.save_api_key_note(content, provider=provider, title=title)
+            except Exception as e:  # noqa: BLE001
+                await self.send_text(chat_id, f"⚠️ 保存失败：{type(e).__name__}", "chat_id")
+                return
+            if not note:
+                await self.send_text(chat_id, "⚠️ 未识别到有效 Key", "chat_id")
+                return
+            state = ("✅ 有效" if note["tested"] == "ok"
+                     else "❌ 无效" if note["tested"] == "fail" else "⚠️ 未验证")
+            await self.send_text(chat_id,
+                                 f"🔑 已保存 API Key（#{note['id']} · {note['provider']}）\n"
+                                 f"Key：{self._mask_key(content)}\n可用性：{state} — {note['test_result']}",
+                                 "chat_id")
+            return
+        try:
+            nid = await db.add_note(title, category, provider, content, [],
+                                    tested="untested", test_result="")
+            await self.send_text(chat_id, f"📝 已保存笔记 #{nid}：{title}", "chat_id")
+        except Exception as e:  # noqa: BLE001
+            await self.send_text(chat_id, f"⚠️ 保存失败：{type(e).__name__}", "chat_id")
 
     # ---------------- 底层收发 ----------------
     async def _get_token(self) -> str | None:
@@ -447,7 +605,11 @@ class FeishuService:
             "· `待办 <内容>` — 记一条待办\n"
             "· `待办列表` — 查看未完成待办\n"
             "· `完成 <编号>` — 标记某条待办完成\n"
-            "· 其它任意文字 — 转发给 AI（DeepSeek）问答\n\n"
+            "· `存key <服务商> <key>` — 保存 API Key 并自动测可用性（服务商可省，自动识别）\n"
+            "· `记笔记 <内容>` — 保存一条技术笔记\n"
+            "· `查笔记 <关键词>` — 检索已存笔记\n"
+            "· `笔记列表` — 查看已存笔记\n"
+            "· 其它任意文字 — 转发给 AI（DeepSeek）问答，也可自然语言让它存笔记\n\n"
             "⚠️ 首次使用请**私聊**本 bot 完成管理员配对（自动绑定你的账号）。"
         )
 

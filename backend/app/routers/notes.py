@@ -69,6 +69,56 @@ async def _test_api_key(provider: str, key: str) -> tuple[str, str]:
         return "fail", f"验证异常：{type(e).__name__}（网络不通或需代理）"
 
 
+# 公共别名，供飞书 bot 等其它入口复用
+PROVIDER_BASE = _PROVIDER_BASE
+_PROVIDER_CN = {"siliconflow": "硅基流动", "deepseek": "DeepSeek", "openai": "OpenAI", "other": "其他"}
+
+
+def _note_tags(provider: str) -> list[str]:
+    """给 apikey 笔记生成标签：英文服务商 + 中文别名，便于中英文都能检索到。"""
+    tags = ["API", "Key"]
+    if provider:
+        tags.append(provider)
+        cn = _PROVIDER_CN.get(provider)
+        if cn:
+            tags.append(cn)
+    return tags
+
+
+async def detect_provider(key: str) -> str:
+    """按已知服务商依次 GET /models 探测 key 归属，无法确定返回 other。"""
+    for provider, base in _PROVIDER_BASE.items():
+        try:
+            async with httpx.AsyncClient(timeout=10) as c:
+                r = await c.get(f"{base}/models", headers={"Authorization": f"Bearer {key}"})
+            if r.status_code == 200:
+                return provider
+        except Exception:  # noqa: BLE001
+            continue
+    return "other"
+
+
+async def save_api_key_note(key: str, provider: str = "", title: str = "API Key") -> dict | None:
+    """保存一条 apikey 笔记：探活通过才采用 provider；否则回退自动探测（纠正 AI 猜错服务商）。"""
+    key = (key or "").strip()
+    if not key:
+        return None
+    provider = (provider or "").strip()
+    # 显式 provider 且探活通过 → 直接采用
+    if provider in _PROVIDER_BASE:
+        tested, test_result = await _test_api_key(provider, key)
+        if tested == "ok":
+            nid = await db.add_note(title, "apikey", provider, key, _note_tags(provider),
+                                    tested=tested, test_result=test_result)
+            return await db.get_note(nid)
+    # 否则自动探测服务商（能准确识别，纠正 openai 等误判）
+    provider = await detect_provider(key)
+    tested, test_result = await _test_api_key(provider, key)
+    nid = await db.add_note(title, "apikey", provider, key, _note_tags(provider),
+                            tested=tested, test_result=test_result)
+    return await db.get_note(nid)
+
+
 @router.get("")
 async def list_notes(q: str = "", category: str = "", limit: int = 100):
     return await db.list_notes(q=q, category=category, limit=limit)

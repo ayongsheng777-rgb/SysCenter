@@ -95,6 +95,14 @@ AI 模块是「运维大脑」——把系统日志 / 报错丢给大模型，�
 
 > ⚠️ **坑（已修）**：corpus 里**必须**拼入 `test_result`（不只 `content`），否则问「key 还能用吗」时模型只看到一串裸 key，会答「笔记里没有相关信息」。见 `notes.py` 的 `corpus` 拼接。
 
+**飞书入口（2026-08-19 新增）**：`feishu.py` 也接了笔记能力，双通道：
+- **明确指令**（`_route_message` 路由）：`存key <服务商> <key>`（服务商可省，自动识别）、`记笔记 <内容>`、`查笔记 <关键词>`、`笔记列表`。
+- **AI 自然语言**（`_cmd_ai` 改造）：system prompt 让 AI 在用户想「保存信息」时回 `{"action":"save_note",...}` JSON，后端 `ai_client._extract_json` 解析后落库（apikey 自动测）；普通问答仍纯文本不误触发。
+- 复用 `notes.save_api_key_note(key, provider, title)`：显式 provider 探活通过才采用，否则回退 `detect_provider()` 自动探测。
+- 回复时 key 一律脱敏（`_mask_key`：前 8 后 4）。
+
+> ⚠️ **坑（已修）**：AI 会按 `sk-` 前缀把硅基流动 key 误判成 openai → `save_api_key_note` 里「显式 provider 测不过就自动探测」已兜住；tags 里加中文别名（`_PROVIDER_CN`），否则中文搜「硅基流动」命中不了英文 `siliconflow`。
+
 ---
 
 ## 3. SOP
