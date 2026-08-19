@@ -18,7 +18,7 @@ from . import auth, db, feishu, scheduler
 from .config import settings
 from .request_ctx import get_request_id, set_request_context
 from .routers import (ai, alerts, audit, auth as auth_router, automation, feishu_bot,
-                      modules, network, notify, settings as settings_router, system, todos, vps)
+                      modules, network, notify, notes, settings as settings_router, system, todos, vps)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("main")
@@ -64,7 +64,7 @@ async def security_headers(request, call_next):
     return resp
 
 # 路由注册
-for r in (auth_router, system, network, vps, modules, ai, notify, settings_router, automation, alerts, feishu_bot, todos, audit):
+for r in (auth_router, system, network, vps, modules, ai, notify, settings_router, automation, alerts, feishu_bot, todos, audit, notes):
     app.include_router(r.router)
 
 

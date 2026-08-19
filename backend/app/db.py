@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 from datetime import datetime
 from typing import Any, Optional
@@ -109,6 +110,21 @@ CREATE TABLE IF NOT EXISTS audit_log (
     request_id  TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts DESC);
+
+-- AI 笔记 / 知识库（API Key、技术信息等个人沉淀，供「问 AI」调取）
+CREATE TABLE IF NOT EXISTS ai_notes (
+    id           BIGSERIAL PRIMARY KEY,
+    title        TEXT NOT NULL,
+    category     TEXT NOT NULL DEFAULT 'other',   -- apikey|tech|other
+    provider     TEXT NOT NULL DEFAULT '',         -- 仅 apikey 类：deepseek|siliconflow|openai|other
+    content      TEXT NOT NULL,
+    tags         TEXT NOT NULL DEFAULT '',         -- 逗号分隔
+    tested       TEXT NOT NULL DEFAULT 'untested', -- ok|fail|untested|skipped
+    test_result  TEXT NOT NULL DEFAULT '',
+    created_at   TIMESTAMPTZ DEFAULT now(),
+    updated_at   TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_ai_notes_ts ON ai_notes(created_at DESC);
 """
 
 
@@ -164,6 +180,19 @@ async def init_pool():
                         f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {definition}")
                 except Exception as ex:  # noqa: BLE001
                     log.warning("迁移列 %s.%s 失败(可忽略): %s", table, col, str(ex)[:80])
+    # 笔记表：无论 alembic 是否成功都确保存在（CREATE TABLE IF NOT EXISTS 幂等）
+    try:
+        async with _pool.acquire() as c:
+            await c.execute(
+                "CREATE TABLE IF NOT EXISTS ai_notes ("
+                "id BIGSERIAL PRIMARY KEY, title TEXT NOT NULL, "
+                "category TEXT NOT NULL DEFAULT 'other', provider TEXT NOT NULL DEFAULT '', "
+                "content TEXT NOT NULL, tags TEXT NOT NULL DEFAULT '', "
+                "tested TEXT NOT NULL DEFAULT 'untested', test_result TEXT NOT NULL DEFAULT '', "
+                "created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now())")
+    except Exception as e:  # noqa: BLE001
+        log.warning("ai_notes 建表失败(可忽略): %s", str(e)[:120])
+
     log.info("Postgres 就绪")
     return _pool
 
@@ -408,7 +437,85 @@ async def done_todo(tid: int) -> bool:
 async def delete_todo(tid: int) -> bool:
     async with pool().acquire() as c:
         r = await c.execute("DELETE FROM todos WHERE id=$1", tid)
-        return "DELETE 1" in str(r).upper()
+    return "DELETE 1" in str(r).upper()
+
+
+# ---------------- AI 笔记 / 知识库 ----------------
+def _row_to_note(r) -> dict:
+    d = dict(r)
+    d["tags"] = [t.strip() for t in (d.get("tags") or "").split(",") if t.strip()]
+    d["created_at"] = d["created_at"].isoformat() if d.get("created_at") else None
+    d["updated_at"] = d["updated_at"].isoformat() if d.get("updated_at") else None
+    return d
+
+
+async def add_note(title: str, category: str, provider: str, content: str,
+                  tags, tested: str = "untested", test_result: str = "") -> int:
+    tag_str = ",".join(tags) if isinstance(tags, (list, tuple)) else (tags or "")
+    async with pool().acquire() as c:
+        row = await c.fetchrow(
+            "INSERT INTO ai_notes(title, category, provider, content, tags, tested, test_result) "
+            "VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id",
+            title, category, provider, content, tag_str, tested, test_result)
+    return row["id"]
+
+
+async def get_note(nid: int) -> dict | None:
+    async with pool().acquire() as c:
+        row = await c.fetchrow("SELECT * FROM ai_notes WHERE id=$1", nid)
+    return _row_to_note(row) if row else None
+
+
+async def list_notes(q: str = "", category: str = "", limit: int = 100) -> list[dict]:
+    """按标题/内容/标签关键词检索笔记（中文按连续字、英文按词分词，任一命中即匹配）。"""
+    clauses: list[str] = []
+    params: list = []
+    if category:
+        clauses.append(f"category=${len(params) + 1}")
+        params.append(category)
+    if q:
+        toks = re.findall(r"[A-Za-z0-9]{2,}|[\u4e00-\u9fff]{2,}", q)
+        if toks:
+            sub = []
+            for t in toks:
+                like = f"%{t}%"
+                sub.append(f"(title ILIKE ${len(params) + 1} OR content ILIKE ${len(params) + 1} "
+                           f"OR tags ILIKE ${len(params) + 1})")
+                params.append(like)
+            clauses.append("(" + " OR ".join(sub) + ")")
+    sql = "SELECT * FROM ai_notes"
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY created_at DESC LIMIT $" + str(len(params) + 1)
+    params.append(limit)
+    async with pool().acquire() as c:
+        rows = await c.fetch(sql, *params)
+    return [_row_to_note(r) for r in rows]
+
+
+async def update_note(nid: int, **fields) -> bool:
+    allowed = {"title", "category", "provider", "content", "tags", "tested", "test_result"}
+    sets: list[str] = []
+    params: list = []
+    for k, v in fields.items():
+        if k in allowed and v is not None:
+            if k == "tags" and isinstance(v, (list, tuple)):
+                v = ",".join(v)
+            sets.append(f"{k}=${len(params) + 1}")
+            params.append(v)
+    if not sets:
+        return False
+    sets.append("updated_at=now()")
+    params.append(nid)
+    async with pool().acquire() as c:
+        r = await c.execute(f"UPDATE ai_notes SET {', '.join(sets)} WHERE id=${len(params)}", *params)
+    return "UPDATE 1" in str(r).upper()
+
+
+async def delete_note(nid: int) -> bool:
+    async with pool().acquire() as c:
+        r = await c.execute("DELETE FROM ai_notes WHERE id=$1", nid)
+    return "DELETE 1" in str(r).upper()
 
 
 # ---------------- 告警确认/删除 ----------------
