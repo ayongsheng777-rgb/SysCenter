@@ -64,7 +64,11 @@ async def login(body: OtpIn, request: Request):
     _LOGIN_FAILS.pop(ip, None)
     auth.mark_enrolled()
     res = auth.generate_token("admin")
-    await db.add_audit("admin", "login", ip, "OK")
+    # 审计日志为尽力而为：即使 DB 瞬时不可用也不应阻断登录（避免冷启动竞态把刚通过验证的用户弹回）
+    try:
+        await db.add_audit("admin", "login", ip, "OK")
+    except Exception:  # noqa: BLE001
+        pass
     return res
 
 
