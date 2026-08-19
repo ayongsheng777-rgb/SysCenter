@@ -258,10 +258,30 @@ def runtime_dict() -> dict:
     return out
 
 
+# 硅基流动（SiliconFlow）OpenAI 兼容端点：国内节点，proxy 必须留空
+SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
+
+
 def default_ai_models() -> list:
-    """首次启动的默认模型库：DeepSeek 为主，通义千问为可选兜底（key 留空待填）。"""
+    """首次启动的默认模型库：DeepSeek 为主，硅基流动(SiliconFlow)为可选国内节点。
+
+    说明：源码里硅基流动条目的 api_key 留空（密钥不进 git）；实际 key 由前端填写或
+    运行时写入 app_settings.ai_models。已配置 key 的部署不受影响（DB 非空时本函数不被调用）。
+    """
     return [
         {"id": "deepseek", "name": "DeepSeek (云端推理)", "base_url": "https://api.deepseek.com/v1",
          "model": "deepseek-chat", "api_key": settings.ai_api_key or "", "tags": ["diagnose", "primary"],
          "user_agent": "", "proxy": settings.ai_proxy or ""},
+        {"id": "siliconflow-deepseek-v3", "name": "硅基流动 DeepSeek-V3", "base_url": SILICONFLOW_BASE_URL,
+         "model": "deepseek-ai/DeepSeek-V3", "api_key": "", "tags": ["diagnose", "primary"],
+         "user_agent": "", "proxy": ""},
+        {"id": "siliconflow-deepseek-r1", "name": "硅基流动 DeepSeek-R1 (推理)", "base_url": SILICONFLOW_BASE_URL,
+         "model": "deepseek-ai/DeepSeek-R1", "api_key": "", "tags": ["diagnose", "reasoning"],
+         "user_agent": "", "proxy": ""},
+        {"id": "siliconflow-qwen3-32b", "name": "硅基流动 Qwen3-32B", "base_url": SILICONFLOW_BASE_URL,
+         "model": "Qwen/Qwen3-32B", "api_key": "", "tags": ["diagnose"],
+         "user_agent": "", "proxy": ""},
+        {"id": "siliconflow-qwen3-8b", "name": "硅基流动 Qwen3-8B (轻量)", "base_url": SILICONFLOW_BASE_URL,
+         "model": "Qwen/Qwen3-8B", "api_key": "", "tags": ["diagnose", "fast"],
+         "user_agent": "", "proxy": ""},
     ]

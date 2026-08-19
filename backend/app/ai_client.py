@@ -23,13 +23,14 @@ log = logging.getLogger("ai")
 # 占位符密钥（视为未配置）
 _PLACEHOLDERS = ("your", "xxx", "sk-xxx", "changeme", "placeholder", "todo")
 
-# 强制 temperature 的模型前缀（推理模型只接受特定值）
+# 强制 temperature 的模型（大小写不敏感）
 _FORCED_TEMP = {"kimi-k3": 1.0}
-# 推理模型前缀（答案可能在 reasoning_content，需放宽预算）
-_REASONING_PREFIXES = ("deepseek-reasoner", "deepseek-v4-pro", "kimi-k3", "o1", "o3", "qwq")
+# 推理模型（答案可能在 reasoning_content，需放宽预算）。大小写不敏感子串匹配，
+# 以兼容硅基流动等带路径前缀的模型名（如 deepseek-ai/DeepSeek-R1）。
+_REASONING_SUBSTRINGS = ("deepseek-reasoner", "deepseek-r1", "deepseek-v4-pro", "kimi-k3", "o1", "o3", "qwq")
 _MIN_REASONING_TOKENS = 2000
-# 慢模型前缀（仅放宽超时）
-_SLOW_PREFIXES = ("deepseek-v4-pro", "qwen3.7-max", "qwen3-max")
+# 慢模型（仅放宽超时）
+_SLOW_SUBSTRINGS = ("deepseek-r1", "deepseek-v4-pro", "qwen3.7-max", "qwen3-max", "qwen3-32b", "qwen3-235b")
 _SLOW_TIMEOUT = 150.0
 
 _sem = asyncio.Semaphore(4)          # 并发上限，避免压垮小水管
@@ -116,6 +117,7 @@ async def chat(system: str, user: str, *,
         return None
 
     model = prof.get("model") or settings.ai_model
+    ml = model.lower()
     ck = _key(system, user, model)
     with _cache_lock:
         hit = _cache.get(ck)
@@ -125,13 +127,13 @@ async def chat(system: str, user: str, *,
 
     temp = temperature
     for prefix, forced in _FORCED_TEMP.items():
-        if model.startswith(prefix):
+        if prefix.lower() in ml:
             temp = forced
             break
-    if any(model.startswith(p) for p in _REASONING_PREFIXES):
-        max_tokens = max(max_tokens, _MIN_REASONING_TOKENS)
+    if any(s in ml for s in _REASONING_SUBSTRINGS):
+        max_tokens = max(max_tokens, 2000)
         timeout = max(timeout, 150.0)
-    if any(model.startswith(p) for p in _SLOW_PREFIXES):
+    if any(s in ml for s in _SLOW_SUBSTRINGS):
         timeout = max(timeout, _SLOW_TIMEOUT)
 
     payload = {
@@ -142,7 +144,7 @@ async def chat(system: str, user: str, *,
         "max_tokens": max_tokens,
         "stream": False,
     }
-    if json_mode and any(model.startswith(p) for p in _REASONING_PREFIXES):
+    if json_mode and any(s in ml for s in _REASONING_SUBSTRINGS):
         payload["response_format"] = {"type": "json_object"}
 
     url = (prof.get("base_url") or settings.ai_base_url).rstrip("/") + "/chat/completions"
