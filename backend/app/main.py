@@ -6,13 +6,16 @@
 """
 import logging
 import os
+import sys
 import uuid
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from starlette.responses import JSONResponse
 
 from . import auth, db, feishu, scheduler
 from .config import settings
@@ -66,6 +69,98 @@ async def security_headers(request, call_next):
 # 路由注册
 for r in (auth_router, system, network, vps, modules, ai, notify, settings_router, automation, alerts, feishu_bot, todos, audit, notes):
     app.include_router(r.router)
+
+
+# ============== 健康检查（规格书 §20：/health /health/live /health/ready） ==============
+async def _check_pg() -> bool:
+    try:
+        async with db.pool().acquire() as c:
+            await c.execute("SELECT 1")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _check_redis() -> bool:
+    try:
+        r = db._pool  # 仅探测，不强制
+        from . import redis_client
+        rc = redis_client.get_redis_sync()
+        return bool(rc and rc.ping())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+@app.get("/health")
+async def health():
+    """综合健康：SysCenter + PostgreSQL + Redis。无需鉴权，供监控系统/doctor 使用。"""
+    pg = await _check_pg()
+    redis_ok = await _check_redis()
+    return {
+        "status": "ok" if (pg and redis_ok) else "degraded",
+        "service": "SysCenter",
+        "components": {"postgres": "up" if pg else "down", "redis": "up" if redis_ok else "down"},
+        "otp_setup_open": auth.is_setup_open(),
+    }
+
+
+@app.get("/health/live")
+async def health_live():
+    """存活探针：仅判断进程是否正常。"""
+    return {"status": "up"}
+
+
+@app.get("/health/ready")
+async def health_ready():
+    """就绪探针：判断依赖是否满足服务运行条件。"""
+    pg = await _check_pg()
+    redis_ok = await _check_redis()
+    if pg and redis_ok:
+        return {"status": "ready", "postgres": "up", "redis": "up"}
+    return JSONResponse(status_code=503, content={
+        "status": "not_ready", "postgres": "up" if pg else "down", "redis": "up" if redis_ok else "down"})
+
+
+# ============== 前端静态资源托管（EXE 原生化：SysCenter.exe 直接提供 Web UI，规格书 §17） ==============
+def _find_frontend_dist() -> str | None:
+    """多候选定位 frontend/dist（开发态 / EXE 冻结态 / 安装布局均可）。"""
+    candidates: list[str] = []
+    if os.environ.get("FRONTEND_DIST"):
+        candidates.append(os.environ["FRONTEND_DIST"])
+    # 开发态：backend/app -> ../../frontend/dist
+    candidates.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist")))
+    # EXE onefile 解压目录
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(os.path.join(meipass, "frontend", "dist"))
+    # EXE / 安装目录：<exe_dir>/frontend/dist 或 <exe_dir>/../frontend/dist
+    if getattr(sys, "frozen", False):
+        exedir = os.path.dirname(os.path.abspath(sys.executable))
+        candidates.append(os.path.join(exedir, "frontend", "dist"))
+        candidates.append(os.path.join(exedir, "..", "frontend", "dist"))
+    for c in candidates:
+        if c and os.path.isdir(c):
+            return c
+    return None
+
+
+_DIST = _find_frontend_dist()
+if _DIST:
+    _assets_dir = os.path.join(_DIST, "assets")
+    if os.path.isdir(_assets_dir):
+        app.mount("/assets", StaticFiles(directory=_assets_dir), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def _spa(full_path: str):
+        # /api 由业务路由处理；此处只兜底前端 SPA 路由与静态文件
+        if full_path.startswith("api/"):
+            return JSONResponse(status_code=404, content={"success": False, "code": "NOT_FOUND", "message": "接口不存在"})
+        candidate = os.path.join(_DIST, full_path)
+        if full_path and os.path.isfile(candidate):
+            return FileResponse(candidate)
+        return FileResponse(os.path.join(_DIST, "index.html"))
+else:
+    log.info("未检测到 frontend/dist，跳过静态资源托管（开发态请由 Vite 提供前端）")
 
 
 # ============== 统一异常处理：错误统一返回 {success,code,message,request_id} ==============
@@ -123,6 +218,13 @@ async def on_startup():
     if settings.pg_password in ("syscenter_pass_2026", "ChangeMe_StrongPassw0rd!2026", ""):
         log.warning("PG_PASSWORD 使用了默认值/弱口令或占位符，存在安全风险，"
                     "请在生产环境通过 .env 设置强密码")
+    # 首次绑定 Bootstrap Code（P1-01）：未绑定时生成并打印到日志，/auth/setup 必须携带
+    bootstrap = auth.init_bootstrap()
+    if bootstrap:
+        log.warning("=" * 60)
+        log.warning("首次 OTP 绑定 Bootstrap Code: %s", bootstrap)
+        log.warning("请访问 /api/auth/setup?code=%s 完成绑定（该 Code 仅显示一次，绑定后作废）", bootstrap)
+        log.warning("=" * 60)
     await db.init_pool()
     await db.load_runtime_settings()
     scheduler.start()
@@ -140,4 +242,13 @@ async def on_shutdown():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app.main:app", host=settings.backend_host, port=settings.backend_port, reload=False)
+    # P2-06：启用代理头，使 request.client / X-Forwarded-* 反映真实客户端 IP
+    # （Cloudflare Tunnel / Nginx 反代场景下的登录限速、审计 IP、安全分析依赖此）
+    uvicorn.run(
+        "app.main:app",
+        host=settings.backend_host,
+        port=settings.backend_port,
+        reload=False,
+        proxy_headers=True,
+        forwarded_allow_ips="*",
+    )

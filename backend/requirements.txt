@@ -10,6 +10,7 @@ pydantic-settings==2.7.1
 asyncpg==0.30.0
 redis==5.2.1
 python-dotenv==1.0.1
+cryptography==43.0.3   # Secrets Vault AES-256-GCM 回退（Windows 上用 DPAPI，非 Windows 走此）
 lark-oapi==1.7.2   # 飞书 bot 双向通讯（WebSocket 长连接，对齐 OmniCraft）
 segno==1.5.2       # 本地生成 OTP/飞书扫码二维码（纯 Python，不外发密钥）
 
@@ -18,3 +19,14 @@ segno==1.5.2       # 本地生成 OTP/飞书扫码二维码（纯 Python，不�
 alembic==1.14.0
 sqlalchemy==2.0.36
 psycopg2-binary==2.9.10
+
+# Windows Service 封装（SysCenter.exe install / Service 模式，规格书 §6/§7）
+# 注：PyPI 上 pywin32 仅发布 310/311/312 等整版本标签，无 310.0.1 补丁号
+pywin32==311
+# 集中配置 config/config.yaml 解析（可选，缺失时静默跳过，规格书 §14）
+PyYAML==6.0.2
+
+# 系统托盘 + 无控制台 GUI（EXE 默认托盘模式，规格书 §66）
+# pystray 依赖 pywin32（Windows 后端）与 Pillow（图标绘制）。
+pystray==0.19.5
+Pillow==12.3.0

@@ -112,6 +112,25 @@ cd backend
 .venv/Scripts/alembic.exe upgrade head
 ```
 
+## Windows 原生 EXE 模式（可选，规格书 §1~§90）
+
+SysCenter 亦可编译为 `SysCenter.exe`，**脱离 Python 环境**作为 Windows Service 运行；Docker 仅保留 PostgreSQL + Redis。
+
+```powershell
+# 构建（详见 docs/WINDOWS_EXE_ARCHITECTURE.md）
+.\packaging\windows\build.ps1          # 产出 dist_exe/SysCenter/
+
+# 运行
+SysCenter.exe start                   # 前台
+SysCenter.exe install                 # 安装为 Windows Service（管理员）
+SysCenter.exe status / doctor / version / migrate / backup / restore / config
+```
+
+- 前端由 `SysCenter.exe` 直接托管（`frontend/dist`），无需 Nginx 也可单机运行。
+- 配置集中见 `config/config.yaml`（env/.env 优先级更高）；敏感口令仅由 `.env` 提供。
+- 文档：`docs/WINDOWS_EXE_ARCHITECTURE.md`、`WINDOWS_INSTALL.md`、`WINDOWS_SERVICE.md`、
+  `WINDOWS_BACKUP_RESTORE.md`、`WINDOWS_UPGRADE.md`、`WINDOWS_TROUBLESHOOTING.md`、`WINDOWS_EXE_ACCEPTANCE.md`。
+
 ## 安全
 
 - 公网使用请用 **HTTPS**（推荐 Cloudflare Tunnel / Access 双层门禁）。

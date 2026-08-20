@@ -27,9 +27,10 @@
       <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
         <input v-model="form.title" class="input" placeholder="标题（如：硅基流动 API Key）" />
         <select v-model="form.category" class="input">
-          <option value="apikey">API Key</option>
-          <option value="tech">技术信息</option>
-          <option value="other">其他</option>
+      <option value="apikey">API Key</option>
+      <option value="code">验证码</option>
+      <option value="tech">技术信息</option>
+      <option value="other">其他</option>
         </select>
       </div>
       <div v-if="form.category === 'apikey'" class="grid grid-cols-1 md:grid-cols-2 gap-2">
@@ -117,18 +118,18 @@ const editing = ref(null)
 const revealed = ref(new Set())
 const form = reactive({ title: '', category: 'apikey', provider: 'siliconflow', content: '', tags: '', tested: '', test_result: '' })
 
-const CAT = { apikey: 'API Key', tech: '技术', other: '其他' }
+const CAT = { apikey: 'API Key', code: '验证码', tech: '技术', other: '其他' }
 const TESTED = { ok: '已验证 ✓', fail: '验证失败', untested: '未测', skipped: '跳过' }
 
 function catLabel(c) { return CAT[c] || c }
 function catClass(c) {
-  return { apikey: 'text-accent', tech: 'text-ok', other: 'text-gray-400' }[c] || 'text-gray-400'
+  return { apikey: 'text-accent', code: 'text-accent2', tech: 'text-ok', other: 'text-gray-400' }[c] || 'text-gray-400'
 }
 function testedClass(t) {
   return { ok: 'text-ok', fail: 'text-danger', untested: 'text-gray-400', skipped: 'text-gray-400' }[t] || 'text-gray-400'
 }
 function testedLabel(t) { return TESTED[t] || t }
-function isSecret(n) { return n.category === 'apikey' }
+function isSecret(n) { return n.category === 'apikey' || n.category === 'code' }
 function mask(s) {
   if (!s) return ''
   if (s.length <= 12) return '••••••••'

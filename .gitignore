@@ -7,6 +7,12 @@ backend/.ci_data/
 # ===== 构建产物（可重建）=====
 frontend/dist/
 dist/
+build/
+backend/build/
+backend/dist/
+dist_exe/
+build_venv/
+build_venv_*/
 
 # ===== Python =====
 __pycache__/

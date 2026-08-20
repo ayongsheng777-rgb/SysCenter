@@ -13,7 +13,8 @@ from pydantic import BaseModel
 
 from .. import ai_client, db
 from ..config import settings
-from ..security import require_auth
+from ..security import require_auth, require_role
+from .. import sensitive
 
 log = logging.getLogger("notes")
 
@@ -26,7 +27,7 @@ _PROVIDER_BASE = {
     "openai": "https://api.openai.com/v1",
 }
 
-_VALID_CATEGORIES = ("apikey", "tech", "other")
+_VALID_CATEGORIES = ("apikey", "code", "tech", "other")
 
 
 class NoteIn(BaseModel):
@@ -124,7 +125,7 @@ async def list_notes(q: str = "", category: str = "", limit: int = 100):
     return await db.list_notes(q=q, category=category, limit=limit)
 
 
-@router.post("")
+@router.post("", dependencies=[Depends(require_role("admin"))])
 async def create_note(body: NoteIn):
     title = (body.title or "").strip()
     content = (body.content or "").strip()
@@ -132,12 +133,20 @@ async def create_note(body: NoteIn):
         raise HTTPException(status_code=400, detail="title 与 content 不能为空")
     category = body.category if body.category in _VALID_CATEGORIES else "other"
 
+    # code（一次性验证码/授权码）不是模型密钥，不拿去探活，避免误报“未验证”
+    provider = body.provider if category == "apikey" else ""
     tested, test_result = "untested", ""
     if category == "apikey":
-        tested, test_result = await _test_api_key(body.provider, body.content)
+        tested, test_result = await _test_api_key(provider, content)
+    elif category == "code":
+        tested, test_result = "skipped", "一次性验证码，无需验证可用性"
 
-    nid = await db.add_note(title, category, body.provider, content,
-                            body.tags, tested=tested, test_result=test_result)
+    tags = list(body.tags)
+    if category == "code" and not tags:
+        tags = ["验证码"]
+
+    nid = await db.add_note(title, category, provider, content,
+                            tags, tested=tested, test_result=test_result)
     note = await db.get_note(nid)
     await db.add_audit("admin", "note_create", category, f"title={title} tested={tested}")
     return note
@@ -151,7 +160,7 @@ async def get_note(nid: int):
     return note
 
 
-@router.put("/{nid}")
+@router.put("/{nid}", dependencies=[Depends(require_role("admin"))])
 async def update_note(nid: int, body: NotePatch):
     existing = await db.get_note(nid)
     if not existing:
@@ -170,7 +179,7 @@ async def update_note(nid: int, body: NotePatch):
     return await db.get_note(nid)
 
 
-@router.delete("/{nid}")
+@router.delete("/{nid}", dependencies=[Depends(require_role("admin"))])
 async def remove_note(nid: int):
     ok = await db.delete_note(nid)
     if not ok:
@@ -203,7 +212,9 @@ async def ask(body: AskIn):
         "严禁编造笔记里没有的内容；如果笔记不足以回答，明确说「笔记里没有相关信息」。"
         "回答用中文，简洁、可直接取用。"
     )
-    user = f"用户问题：{q}\n\n=== 相关笔记 ===\n{corpus}"
+    # P2-08：笔记可能含 API Key，发 AI 前脱敏
+    safe_corpus = sensitive.redact(corpus)
+    user = f"用户问题：{q}\n\n=== 相关笔记 ===\n{safe_corpus}"
     chain = settings.get_scenario_fallback_chain("notes")
     answer = await ai_client.chat_with_fallback(system, user, chain, max_tokens=1200, temperature=0.2)
     if not answer:

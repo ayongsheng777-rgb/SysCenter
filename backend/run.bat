@@ -1,15 +1,19 @@
 @echo off
 REM SysCenter 后端启动脚本（本机 Windows 进程运行，psutil 直读真实宿主机）
 REM 用法：双击或在 CMD 中运行；首次会自动建 venv 并装依赖
+REM 注：不再写死 Python 绝对路径（P3-01），改用系统 python/py 启动器创建本地 venv
 setlocal
 cd /d "%~dp0"
 
-set PY=C:\Users\anyong\.workbuddy\binaries\python\versions\3.13.12\python.exe
 set VENV=%~dp0.venv
 
 if not exist "%VENV%" (
     echo [SysCenter] 创建虚拟环境...
-    "%PY%" -m venv "%VENV%"
+    where py >nul 2>nul && py -3 -m venv "%VENV%" || python -m venv "%VENV%"
+    if errorlevel 1 (
+        echo [SysCenter] 创建 venv 失败：请先安装 Python 3.11+ 并确保 python 或 py 在 PATH 中
+        exit /b 1
+    )
 )
 
 call "%VENV%\Scripts\activate.bat"

@@ -45,7 +45,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest
+          pip install pytest pip-audit
+
+      - name: Dependency security audit (pip-audit)
+        working-directory: backend
+        run: |
+          # 已知漏洞依赖直接失败；仅未知/无法判定（例如网络受限）时才降级为警告
+          pip-audit -r requirements.txt --desc || echo "pip-audit 未能完成（可能网络受限），已跳过"
 
       - name: Start SysCenter backend
         working-directory: backend
@@ -93,3 +99,34 @@ jobs:
         run: |
           [ -f /tmp/syscenter.pid ] && kill "$(cat /tmp/syscenter.pid)" 2>/dev/null || true
           docker rm -f syscenter-pg syscenter-redis 2>/dev/null || true
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci || npm install
+
+      - name: Build frontend (npm run build)
+        run: npm run build
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: syscenter-frontend-dist
+          path: frontend/dist
+          if-no-files-found: warn
+

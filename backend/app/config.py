@@ -7,16 +7,97 @@
 """
 import json
 import os
+import sys
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 
-# 加载项目根目录 .env（docker-compose 与后端共享同一份；密码不入库、不进 config 默认值）
-try:
-    from dotenv import load_dotenv
+# 加载 .env：按候选路径依次尝试（开发态项目根 / EXE 目录 / 当前目录），
+# 确保 EXE 冻结后.env 仍能被找到（规格书 §47/§48：不依赖 CWD）。
+def _project_root() -> Path:
+    if getattr(sys, "frozen", False):
+        # EXE 冻结态：以 exe 所在目录为基准（生产布局 <安装目录>/SysCenter.exe）
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent.parent
 
-    load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env")))
-except Exception:  # noqa: BLE001
-    pass
+
+def _load_dotenv_multi():
+    try:
+        from dotenv import load_dotenv
+    except Exception:  # noqa: BLE001
+        return
+    candidates = [
+        _project_root() / ".env",
+        Path.cwd() / ".env",
+    ]
+    if getattr(sys, "frozen", False):
+        candidates.insert(0, Path(sys.executable).resolve().parent / ".env")
+    for p in candidates:
+        try:
+            if p.is_file():
+                load_dotenv(str(p))
+                break
+        except Exception:  # noqa: BLE001
+            continue
+
+
+_load_dotenv_multi()
+
+# 把 config/config.yaml 作为环境变量默认值写入（env/.env 优先级更高，规格书 §15）。
+# 仅当对应环境变量尚未设置时才写入，绝不覆盖已有值，避免回归。
+def _apply_config_yaml():
+    try:
+        import yaml
+    except Exception:  # noqa: BLE001
+        return  # 未安装 PyYAML 时静默跳过（config.yaml 为可选集中配置）
+    cfg_path = None
+    for base in (_project_root(), Path.cwd()):
+        cand = base / "config" / "config.yaml"
+        if cand.is_file():
+            cfg_path = cand
+            break
+    if cfg_path is None:
+        return
+    try:
+        data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001
+        return
+
+    # YAML 扁平键 -> 环境变量名
+    mapping = {
+        ("service", "backend_host"): "BACKEND_HOST",
+        ("service", "backend_port"): "BACKEND_PORT",
+        ("postgres", "pg_host"): "PG_HOST",
+        ("postgres", "pg_port"): "PG_PORT",
+        ("postgres", "pg_user"): "PG_USER",
+        ("postgres", "pg_password"): "PG_PASSWORD",
+        ("postgres", "pg_database"): "PG_DATABASE",
+        ("redis", "redis_host"): "REDIS_HOST",
+        ("redis", "redis_port"): "REDIS_PORT",
+        ("redis", "redis_db"): "REDIS_DB",
+        ("ai", "ai_enabled"): "AI_ENABLED",
+        ("ai", "ai_base_url"): "AI_BASE_URL",
+        ("ai", "ai_api_key"): "AI_API_KEY",
+        ("ai", "ai_model"): "AI_MODEL",
+        ("feishu", "feishu_enabled"): "FEISHU_ENABLED",
+        ("feishu", "feishu_webhook"): "FEISHU_WEBHOOK",
+        ("feishu", "feishu_secret"): "FEISHU_SECRET",
+        ("monitor", "health_check_enabled"): "HEALTH_CHECK_ENABLED",
+        ("monitor", "health_check_interval"): "HEALTH_CHECK_INTERVAL",
+        ("monitor", "alert_cpu_threshold"): "ALERT_CPU_THRESHOLD",
+        ("monitor", "alert_ram_threshold"): "ALERT_RAM_THRESHOLD",
+        ("monitor", "alert_disk_threshold"): "ALERT_DISK_THRESHOLD",
+    }
+    for (section, key), env in mapping.items():
+        if env in os.environ:
+            continue  # 已有更高优先级来源，不覆盖
+        val = (data.get(section) or {}).get(key)
+        if val is None or val == "":
+            continue
+        os.environ[env] = str(val)
+
+
+_apply_config_yaml()
 
 # 轮循计数器：{scenario: int}，线程安全
 _RR_LOCK = threading.Lock()

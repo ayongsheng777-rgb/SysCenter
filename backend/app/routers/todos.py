@@ -7,13 +7,15 @@
 - bot 指令与 REST 共用 db.todos
 """
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .. import ai_client, db
 from ..config import settings
-from ..security import require_auth
+from ..security import require_auth, require_role
+from .. import sensitive
 
 log = logging.getLogger("todos")
 
@@ -25,7 +27,8 @@ class TodoIn(BaseModel):
 
 
 class StatusIn(BaseModel):
-    status: str  # 未完成 | 部分完成 | 已完成
+    # P3-04：后端枚举约束，杜绝非法状态写入数据库（前端三选项之外的字符串被拒）
+    status: Literal["未完成", "部分完成", "已完成"]
 
 
 # 范畴判定：是否属 Windows 运维 / 局域网 / NAS / 软路由 / VPS / Docker 自动化
@@ -40,7 +43,7 @@ async def list_todos(all: int = 0, query: str = ""):
     return await db.list_todos(only_open=not all, limit=100, query=(query or "").strip())
 
 
-@router.post("")
+@router.post("", dependencies=[Depends(require_role("admin"))])
 async def add_todo(body: TodoIn):
     content = (body.content or "").strip()
     if not content:
@@ -50,7 +53,8 @@ async def add_todo(body: TodoIn):
     is_sys = 0
     if settings.ai_enabled and settings.ai_ready:
         try:
-            verdict = await ai_client.chat(_SCOPE_SYSTEM, content, max_tokens=8, temperature=0.0,
+            safe_content = sensitive.redact(content)
+            verdict = await ai_client.chat(_SCOPE_SYSTEM, safe_content, max_tokens=8, temperature=0.0,
                                            cache_ttl=3600)
             if verdict and "是" in verdict:
                 is_sys = 1
@@ -62,7 +66,7 @@ async def add_todo(body: TodoIn):
     return item
 
 
-@router.put("/{tid}/status")
+@router.put("/{tid}/status", dependencies=[Depends(require_role("admin"))])
 async def update_status(tid: int, body: StatusIn):
     ok = await db.update_todo_status(tid, body.status)
     if not ok:
@@ -70,7 +74,7 @@ async def update_status(tid: int, body: StatusIn):
     return {"ok": True}
 
 
-@router.delete("/{tid}")
+@router.delete("/{tid}", dependencies=[Depends(require_role("admin"))])
 async def remove_todo(tid: int):
     ok = await db.delete_todo(tid)
     if not ok:
@@ -87,7 +91,7 @@ async def suggest(tid: int):
         raise HTTPException(status_code=400, detail="AI 未启用或未配置 Key（设置页开启）")
 
     prompt = (
-        f"针对系统运维任务：【{task['content']}】，当前状态【{task['status']}】。"
+        f"针对系统运维任务：【{sensitive.redact(task['content'])}】，当前状态【{task['status']}】。"
         f"请给出可执行的排障思路或具体操作建议（中文，分步骤）。"
     )
     chain = settings.get_scenario_fallback_chain("diagnose")

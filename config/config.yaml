@@ -1,0 +1,46 @@
+# SysCenter 集中配置（规格书 §14/§15）
+# 优先级：环境变量 / .env  >  本文件  >  代码默认值
+# 说明：
+#   - 本文件可纳入版本控制（密钥留空，由 .env 提供，禁止提交明文口令/Key）。
+#   - 修改后无需改代码；SysCenter.exe 启动时会把本文件的值作为环境变量默认值写入。
+#   - 端口、数据库、Redis 等必须集中配置（规格书 §19）。
+#   - EXE 模式下可用 DATA_DIR 环境变量把数据重定向到 C:\ProgramData\SysCenter\data。
+
+service:
+  backend_host: 0.0.0.0
+  backend_port: 8352
+
+paths:
+  data_dir: data          # 相对 APP_HOME；生产可设为 C:\ProgramData\SysCenter\data
+  log_dir: logs
+  backup_dir: backup
+
+postgres:
+  pg_host: 127.0.0.1
+  pg_port: 5442
+  pg_user: syscenter
+  pg_password: ""         # 由 .env 提供，勿提交明文
+  pg_database: syscenter
+
+redis:
+  redis_host: 127.0.0.1
+  redis_port: 6387
+  redis_db: 0
+
+ai:
+  ai_enabled: false
+  ai_base_url: https://api.deepseek.com/v1
+  ai_api_key: ""
+  ai_model: deepseek-chat
+
+feishu:
+  feishu_enabled: false
+  feishu_webhook: ""
+  feishu_secret: ""
+
+monitor:
+  health_check_enabled: true
+  health_check_interval: 300
+  alert_cpu_threshold: 90
+  alert_ram_threshold: 90
+  alert_disk_threshold: 90

@@ -7,7 +7,7 @@
 """
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Header, Request
+from fastapi import APIRouter, Depends, HTTPException, Header, Query, Request
 from pydantic import BaseModel
 
 from .. import auth, db
@@ -33,11 +33,19 @@ class ResetOut(BaseModel):
 
 
 @router.get("/setup")
-def setup():
-    """获取 OTP 绑定信息（仅在尚未绑定时返回密钥/二维码 URI）。"""
+def setup(code: str = Query(None, description="首次绑定的一次性 Bootstrap Code（见后端启动日志）")):
+    """获取 OTP 绑定信息（仅在尚未绑定时返回密钥/二维码 URI）。
+
+    安全整改（P1-01）：未绑定时必须携带后端启动日志中打印的一次性 Bootstrap Code，
+    否则不返回任何密钥材料，防止部署初期短暂暴露公网被任意访客拿走初始 OTP 密钥。
+    """
     if not auth.is_setup_open():
         return {"setup_open": False, "otpauth_uri": "", "secret": "", "qr": "",
                 "hint": "已完成绑定或使用了环境变量密钥，密钥不再暴露"}
+    if not auth.verify_bootstrap(code):
+        raise HTTPException(
+            status_code=403,
+            detail="需要有效的 Bootstrap Code 才能获取 OTP 密钥（见后端启动日志 / 运行 `SysCenter.exe doctor`）")
     uri = auth.otpauth_uri()
     from ..qrutil import qr_data_url
     return {"setup_open": True, "otpauth_uri": uri, "secret": auth.get_secret(),

@@ -24,6 +24,7 @@ import httpx
 
 from . import db
 from .config import settings
+from . import sensitive
 
 log = logging.getLogger("feishu")
 
@@ -97,8 +98,18 @@ async def send_card(title: str, lines: list[str], template: str = "red") -> tupl
 
 
 async def notify(level: str, source: str, message: str, payload: dict | None = None):
-    """统一入口：推送飞书 + 落库告警日志（被健康检查等内部调用）。"""
+    """统一入口：落库告警日志 + 推送飞书（被手动告警 /api/notify 调用，单次落库）。"""
     await db.save_alert(level, source, message, payload)
+    icon = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}.get(level, "ℹ️")
+    title = f"{icon} SysCenter 告警"
+    ok, msg = await send_card(title, [f"**级别**：{level}", f"**来源**：{source}", f"**内容**：{message}"])
+    if not ok:
+        log.warning("飞书推送失败: %s", msg)
+    return ok, msg
+
+
+async def send(level: str, source: str, message: str, payload: dict | None = None):
+    """仅推送飞书，不落库（落库由调用方负责，用于避免调度器重复写入告警，P2-02）。"""
     icon = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}.get(level, "ℹ️")
     title = f"{icon} SysCenter 告警"
     ok, msg = await send_card(title, [f"**级别**：{level}", f"**来源**：{source}", f"**内容**：{message}"])
@@ -314,6 +325,12 @@ class FeishuService:
             await self._cmd_note_list(chat_id)
             return
 
+        # 明文查看：明文 / 明文显示 / 显示明文 / 显示 <编号>
+        for kw in ("明文显示", "显示明文", "明文", "显示"):
+            if text.startswith(kw):
+                await self._cmd_show_plaintext(chat_id, text[len(kw):].strip(" ：:　#"))
+                return
+
         # 其余任意文字 → 转发给 AI（DeepSeek）
         await self._cmd_ai(chat_id, text)
 
@@ -394,15 +411,22 @@ class FeishuService:
             from . import ai_client
             system = (
                 "你是 SysCenter 的系统管理助手，回答要简洁、用中文、面向个人服务器/运维场景。"
-                "如果用户想让你【保存/记录】某条信息（例如 API Key、密钥、账号、技术排障经验、配置片段），"
-                "不要口头答应，严格输出一个 JSON 对象（不要带任何多余文字、不要 markdown 围栏）：\n"
-                '{"action":"save_note","title":"<简短标题>","category":"apikey|tech|other",'
+                "如果用户想让你【保存/记录】某条信息，不要口头答应，严格输出一个 JSON 对象"
+                "（不要带任何多余文字、不要 markdown 围栏）：\n"
+                '{"action":"save_note","title":"<简短标题>","category":"apikey|code|tech|other",'
                 '"provider":"siliconflow|deepseek|openai|空","content":"<用户给出的完整原文，不得改动或补全>"}\n'
-                "category 判断：API Key/密钥/Token → apikey；技术经验/排障步骤 → tech；其它 → other。\n"
-                "provider 仅 apikey 时填服务商（siliconflow/deepseek/openai），不确定就留空字符串。\n"
-                "如果用户不是想保存信息，就正常直接回答（纯文本，不要输出 JSON）。"
+                "category 判断：\n"
+                "· API Key/密钥/Token（用于调模型或接口的长期密钥）→ apikey；\n"
+                "· 一次性验证码/授权码/登录链接/邀请码/connect code（如浏览器配对码、应用授权码）→ code；\n"
+                "· 技术经验/排障步骤 → tech；其它 → other。\n"
+                "provider 仅 apikey 时填服务商（siliconflow/deepseek/openai），不确定就留空字符串；code 类不要填 provider。\n"
+                "如果用户想【查看某条记录的明文完整内容】（例如说“把第11条明文发我”“显示 #12 的完整内容”），"
+                '输出：{"action":"show_plaintext","id":<记录编号>}\n'
+                "如果用户既不是保存也不是查看明文，就正常直接回答（纯文本，不要输出 JSON）。"
             )
-            reply = await ai_client.chat(system, text, max_tokens=1500, temperature=0.3, timeout=60.0)
+            # P2-08：发给 AI 前对用户消息脱敏（密钥/Token/密码等）
+            safe_text = sensitive.redact(text)
+            reply = await ai_client.chat(system, safe_text, max_tokens=1500, temperature=0.3, timeout=60.0)
         except Exception as e:  # noqa: BLE001
             reply = None
             log.warning("[feishu] AI 中转失败：%s", e)
@@ -417,6 +441,15 @@ class FeishuService:
             intent = None
         if isinstance(intent, dict) and intent.get("action") == "save_note":
             await self._exec_save_note(chat_id, intent)
+            return
+        if isinstance(intent, dict) and intent.get("action") == "show_plaintext":
+            nid = intent.get("id")
+            if isinstance(nid, str) and str(nid).isdigit():
+                nid = int(nid)
+            if isinstance(nid, int):
+                await self._cmd_show_plaintext(chat_id, str(nid))
+            else:
+                await self.send_text(chat_id, "用法：查看明文需指定记录编号，例如「显示 11 的明文」", "chat_id")
             return
         # 飞书单条文本上限保护
         if len(reply) > 3000:
@@ -492,7 +525,10 @@ class FeishuService:
         lines = [f"🔍 命中 {len(notes)} 条："]
         for n in notes:
             c = n["content"] or ""
-            c = self._mask_key(c) if n["category"] == "apikey" else c[:60] + ("…" if len(c) > 60 else "")
+            if n["category"] in ("apikey", "code"):
+                c = self._mask_key(c)
+            else:
+                c = c[:60] + ("…" if len(c) > 60 else "")
             state = {"ok": "✅", "fail": "❌"}.get(n["tested"], "·")
             lines.append(f"#{n['id']} [{n['category']}] {n['title']} {state}\n    {c}")
         await self.send_text(chat_id, "\n".join(lines), "chat_id")
@@ -512,10 +548,34 @@ class FeishuService:
         lines.append("\n查详情：`查笔记 <关键词>`")
         await self.send_text(chat_id, "\n".join(lines), "chat_id")
 
+    async def _cmd_show_plaintext(self, chat_id: str, arg: str) -> None:
+        """查看某条记录的完整明文（API Key / 验证码等），不做脱敏。"""
+        arg = (arg or "").strip().lstrip("#")
+        if not arg.isdigit():
+            await self.send_text(chat_id,
+                                 "用法：`明文 <编号>`（如 `明文 11`），或 `明文显示 11` 查看完整内容。",
+                                 "chat_id")
+            return
+        nid = int(arg)
+        try:
+            note = await db.get_note(nid)
+        except Exception as e:  # noqa: BLE001
+            await self.send_text(chat_id, f"⚠️ 读取失败：{type(e).__name__}", "chat_id")
+            return
+        if not note:
+            await self.send_text(chat_id, f"⚠️ 没有找到编号为 {nid} 的记录。", "chat_id")
+            return
+        content = note.get("content") or ""
+        cat = note.get("category")
+        label = {"apikey": "API Key", "code": "验证码", "tech": "技术", "other": "其他"}.get(cat, cat)
+        await self.send_text(chat_id,
+                             f"🔓 明文（#{nid} · {label}）\n标题：{note.get('title')}\n内容：\n{content}",
+                             "chat_id")
+
     async def _exec_save_note(self, chat_id: str, intent: dict) -> None:
         title = (intent.get("title") or "").strip() or "笔记"
         category = intent.get("category") or "other"
-        if category not in ("apikey", "tech", "other"):
+        if category not in ("apikey", "code", "tech", "other"):
             category = "other"
         content = (intent.get("content") or "").strip()
         provider = (intent.get("provider") or "").strip()
@@ -537,6 +597,18 @@ class FeishuService:
             await self.send_text(chat_id,
                                  f"🔑 已保存 API Key（#{note['id']} · {note['provider']}）\n"
                                  f"Key：{self._mask_key(content)}\n可用性：{state} — {note['test_result']}",
+                                 "chat_id")
+            return
+        if category == "code":
+            try:
+                nid = await db.add_note(title, "code", "", content, ["验证码"],
+                                        tested="skipped", test_result="一次性验证码，无需验证可用性")
+            except Exception as e:  # noqa: BLE001
+                await self.send_text(chat_id, f"⚠️ 保存失败：{type(e).__name__}", "chat_id")
+                return
+            await self.send_text(chat_id,
+                                 f"🔑 已保存验证码（#{nid}）：{title}\n"
+                                 f"内容已加密保存；发「明文 {nid}」查看完整内容。",
                                  "chat_id")
             return
         try:
@@ -609,6 +681,7 @@ class FeishuService:
             "· `记笔记 <内容>` — 保存一条技术笔记\n"
             "· `查笔记 <关键词>` — 检索已存笔记\n"
             "· `笔记列表` — 查看已存笔记\n"
+            "· `明文 <编号>` / `明文显示 <编号>` — 查看某条记录的完整明文（API Key / 验证码等）\n"
             "· 其它任意文字 — 转发给 AI（DeepSeek）问答，也可自然语言让它存笔记\n\n"
             "⚠️ 首次使用请**私聊**本 bot 完成管理员配对（自动绑定你的账号）。"
         )

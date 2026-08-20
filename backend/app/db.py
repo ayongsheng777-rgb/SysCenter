@@ -17,6 +17,7 @@ import asyncpg
 
 from .config import apply_overrides, default_ai_models, settings
 from .request_ctx import get_client_ip, get_request_id
+from . import secret_vault
 
 log = logging.getLogger("db")
 
@@ -137,12 +138,17 @@ def _run_alembic_upgrade() -> None:
     from alembic import command
     from alembic.config import Config
 
-    backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    ini_path = os.path.join(backend_dir, "alembic.ini")
+    # 资源路径：开发态取 backend/；EXE 冻结态取 SysCenter.exe 所在目录
+    # （alembic.ini / migrations 与 exe 同目录，见 syscenter_app.cmd_migrate / _project_root）。
+    if getattr(sys, "frozen", False):
+        base_dir = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ini_path = os.path.join(base_dir, "alembic.ini")
     cfg = Config(ini_path)
-    cfg.set_main_option("script_location", os.path.join(backend_dir, "migrations"))
-    if backend_dir not in sys.path:
-        sys.path.insert(0, backend_dir)
+    cfg.set_main_option("script_location", os.path.join(base_dir, "migrations"))
+    if base_dir not in sys.path:
+        sys.path.insert(0, base_dir)
     command.upgrade(cfg, "head")
 
 
@@ -441,9 +447,16 @@ async def delete_todo(tid: int) -> bool:
 
 
 # ---------------- AI 笔记 / 知识库 ----------------
+# 敏感类笔记（密钥 / 验证码）：内容加密落库、读取时解密
+SECRET_CATEGORIES = {"apikey", "code"}
+
+
 def _row_to_note(r) -> dict:
     d = dict(r)
     d["tags"] = [t.strip() for t in (d.get("tags") or "").split(",") if t.strip()]
+    # P1-02：敏感类（apikey/code）笔记内容读取时解密（旧明文自动兼容）
+    if d.get("category") in SECRET_CATEGORIES:
+        d["content"] = secret_vault.decrypt_str(d.get("content"))
     d["created_at"] = d["created_at"].isoformat() if d.get("created_at") else None
     d["updated_at"] = d["updated_at"].isoformat() if d.get("updated_at") else None
     return d
@@ -452,6 +465,9 @@ def _row_to_note(r) -> dict:
 async def add_note(title: str, category: str, provider: str, content: str,
                   tags, tested: str = "untested", test_result: str = "") -> int:
     tag_str = ",".join(tags) if isinstance(tags, (list, tuple)) else (tags or "")
+    # P1-02：敏感类（apikey/code）笔记内容入库前加密
+    if category in SECRET_CATEGORIES:
+        content = secret_vault.encrypt_str(content)
     async with pool().acquire() as c:
         row = await c.fetchrow(
             "INSERT INTO ai_notes(title, category, provider, content, tags, tested, test_result) "
@@ -497,10 +513,14 @@ async def update_note(nid: int, **fields) -> bool:
     allowed = {"title", "category", "provider", "content", "tags", "tested", "test_result"}
     sets: list[str] = []
     params: list = []
+    category = fields.get("category")
     for k, v in fields.items():
         if k in allowed and v is not None:
             if k == "tags" and isinstance(v, (list, tuple)):
                 v = ",".join(v)
+            # P1-02：若更新内容且为敏感类（apikey/code），写入前加密
+            if k == "content" and (category in SECRET_CATEGORIES):
+                v = secret_vault.encrypt_str(v)
             sets.append(f"{k}=${len(params) + 1}")
             params.append(v)
     if not sets:

@@ -1,0 +1,7 @@
+# SysCenter Windows EXE 打包构建依赖（非运行时，仅打包机使用）
+# 本机缺少 MSVC cl.exe，Nuitka 需 MinGW 且对 asyncpg/cryptography/psutil 等
+# 大量 C 扩展 + lark-oapi 的兼容不稳定；按规格书 §4.1 允许回退到 PyInstaller。
+# PyInstaller 无需 C 编译器，对这些依赖兼容性最佳，作为实际交付打包器。
+# （Nuitka 评估结论见 docs/WINDOWS_EXE_ACCEPTANCE.md，工具链可用时可切回）
+
+pyinstaller==6.11.1

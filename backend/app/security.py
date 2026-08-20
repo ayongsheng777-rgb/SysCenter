@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-"""鉴权依赖：同时支持 TOTP 动态码 与 登录后的会话令牌（Redis 存储）
+"""鉴权依赖：仅接受登录后的会话令牌（Redis 存储的 HMAC 签名 Bearer）
 
-- 请求头 x-otp-token: 6 位动态码（与 Authenticator 对齐）
-- 请求头 Authorization: Bearer <session_token>（登录接口签发，存于 Redis，带 TTL）
-任一通过即可。登录后前端优先用 Bearer 令牌。
+安全整改（P1-03）：
+- 业务接口一律只认 Bearer 会话令牌，不再允许 `x-otp-token` 直通。
+- TOTP 动态码仅用于 `/auth/login` 换取会话令牌（见 routers/auth.py），
+  换到令牌后所有业务 API 都走 Bearer，使登录限速（仅保护 /auth/login）覆盖全链路。
+- 登录失败限速只保护 /auth/login，因此业务接口不能再被 TOTP 绕过。
 
 RBAC：require_role(*roles) 在鉴权通过后校验角色（默认 admin），保护高危路由。
 """
@@ -16,37 +18,32 @@ _bearer = HTTPBearer(auto_error=False)
 
 
 def _raise_unauth():
-    raise HTTPException(status_code=401, detail="需要有效的 OTP 动态码或登录令牌")
+    raise HTTPException(status_code=401, detail="需要有效的登录会话令牌")
 
 
 def _raise_forbidden():
     raise HTTPException(status_code=403, detail="当前角色无权执行该操作")
 
 
-def _resolve_role(
-    x_otp_token: str | None,
-    cred: HTTPAuthorizationCredentials | None,
-) -> str:
-    """解析请求身份，返回角色字符串；鉴权失败直接抛 401。"""
+def _resolve_role(cred: HTTPAuthorizationCredentials | None) -> str:
+    """解析请求身份，返回角色字符串；鉴权失败直接抛 401。
+
+    仅接受 Bearer 会话令牌（HMAC 签名 + Redis 登记 + TTL）。
+    """
     token = cred.credentials if (cred and cred.credentials) else None
-    if token:
-        if auth.verify_token(token):
-            return auth.get_token_role(token)
-        _raise_unauth()  # 令牌形式存在但不合法 -> 拒绝，避免退回 TOTP 造成混淆
-    if x_otp_token:
-        if auth.verify_otp(x_otp_token):
-            return "admin"  # TOTP 直登视为管理员
+    if not token:
         _raise_unauth()
+    if auth.verify_token(token):
+        return auth.get_token_role(token)
     _raise_unauth()
     return "admin"  # 不可达
 
 
 def require_auth(
-    x_otp_token: str | None = Header(None),
     cred: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> bool:
-    """任意已登录（TOTP 或 Bearer）即可。"""
-    _resolve_role(x_otp_token, cred)
+    """任意已登录（Bearer 会话）即可。"""
+    _resolve_role(cred)
     return True
 
 
@@ -58,10 +55,9 @@ def require_role(*allowed_roles: str):
     """
 
     def _dep(
-        x_otp_token: str | None = Header(None),
         cred: HTTPAuthorizationCredentials | None = Depends(_bearer),
     ) -> str:
-        role = _resolve_role(x_otp_token, cred)
+        role = _resolve_role(cred)
         if allowed_roles and role not in allowed_roles:
             _raise_forbidden()
         return role

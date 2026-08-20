@@ -1,11 +1,16 @@
 # -*- coding: utf-8 -*-
 """AI 诊断路由：把日志/异常交给 AI 诊断大脑（DeepSeek 等，带模型兜底）"""
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from .. import ai_client, db
 from ..config import settings
 from ..security import require_auth, require_role
+from .. import sensitive
+
+log = logging.getLogger("ai")
 
 router = APIRouter(prefix="/api/ai", tags=["ai"], dependencies=[Depends(require_auth)])
 
@@ -29,7 +34,9 @@ async def diagnose(req: LogRequest):
     if not settings.ai_ready:
         raise HTTPException(status_code=400, detail="AI 模型未就绪（Key 为空或占位符）")
     chain = settings.get_scenario_fallback_chain(req.scenario)
-    result = await ai_client.chat_with_fallback(_SYSTEM, req.log_content, chain,
+    # P2-08：发给 AI 前对用户粘贴的日志做敏感信息脱敏
+    safe_log = sensitive.redact(req.log_content)
+    result = await ai_client.chat_with_fallback(_SYSTEM, safe_log, chain,
                                                  max_tokens=1500, temperature=0.3)
     if not result:
         raise HTTPException(status_code=502, detail=f"AI 调用失败：{ai_client.stats_dict().get('last_error', '未知错误')}")

@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from .. import db
 from ..modules import net_probe
-from ..security import require_auth
+from ..security import require_auth, require_role
 
 router = APIRouter(prefix="/api/vps", tags=["vps"], dependencies=[Depends(require_auth)])
 
@@ -45,14 +45,14 @@ async def list_vps():
     return await asyncio.gather(*[_probe_one(r) for r in rows])
 
 
-@router.post("")
+@router.post("", dependencies=[Depends(require_role("admin"))])
 async def upsert_vps(body: VpsIn):
     vid = await db.upsert_vps(body.model_dump())
     await db.add_audit("admin", "vps_upsert", body.name, f"kind={body.kind}")
     return {"ok": True, "id": vid}
 
 
-@router.delete("/{vid}")
+@router.delete("/{vid}", dependencies=[Depends(require_role("admin"))])
 async def delete_vps(vid: int):
     ok = await db.delete_vps(vid)
     if not ok:

@@ -9,16 +9,17 @@ AI 模块是「运维大脑」——把系统日志 / 报错丢给大模型，�
 
 ---
 
-## 1. 部署与进程
+## 1. 部署与进程（2026-08-20 起：EXE 唯一运行方案）
 
 | 组件 | 说明 |
 |---|---|
-| 后端 | Windows 进程，venv 在 `backend/.venv`；启动入口 `backend/run.bat` → `uvicorn app.main:app --host 0.0.0.0 --port 8352` |
-| 前端 | nginx 容器，对外 `8372`（域名 `syscenter.yshost.de5.net`） |
-| Postgres | `127.0.0.1:5442`，库名 `syscenter`（密码见 `.env`） |
-| Redis | `127.0.0.1:6387` |
+| 应用（前端+后端） | **`D:\software\SysCenter\SysCenter.exe`**（onedir：exe + `_internal/` + 资源），直接对外 **8352**，自带 Web UI（不再需要 nginx） |
+| 开机自启 | HKCU Run 键 `SysCenter`（`install` 写 / `uninstall` 删），登录自动托盘运行 |
+| 托盘退出 | 托盘菜单「退出」需输 **OTP 动态码**（复用 `data/otp_secret`；tkinter 弹窗 + PowerShell InputBox 兜底） |
+| Postgres | Docker 容器 `syscenter-postgres`，`127.0.0.1:5442`，库 `syscenter`（密码见 `.env`）—— **EXE 的地基，勿删** |
+| Redis | Docker 容器 `syscenter-redis`，`127.0.0.1:6387` ——同上 |
 
-⚠️ **没有看门狗 / 计划任务**：后端是手动拉起的（`uvicorn` 直跑）。杀掉进程后**不会自动重生**，重启必须自己拉（见 §3.2）。
+⚠️ **运行形态 = SysCenter.exe + 两个地基容器**（docker-compose 已只剩 postgres/redis，nginx 已移除）。EXE 内嵌全部应用代码，**改源码后须重新构建 EXE 才生效**（见 §3.2）；旧 dev 版（`backend/.venv` 直跑 uvicorn）仅作开发调试。
 
 ---
 
@@ -117,19 +118,28 @@ AI 模块是「运维大脑」——把系统日志 / 报错丢给大模型，�
 4. 重启后端，或调 `PUT /api/settings` 热更新（需 admin 鉴权）。
 5. 实测：直连 `ai_client.chat`，或前端「AI 诊断」跑一条真实日志。
 
-### 3.2 改 AI 代码后重启（无看门狗，手动）
+### 3.2 改代码后的生效路径（无看门狗）
+
+**正式运行是 EXE**：改 `backend/` 源码 → **重新构建 EXE** → 重启 EXE（托盘退出需 OTP；或 `taskkill //IM SysCenter.exe //F` 后重新启动）。
+
+快速构建（构建 Python 必须自带 tkinter，本机用 `C:\Program Files\Python312`）：
 
 ```powershell
-# 1) 杀旧 uvicorn（父进程 + 子进程都要杀）
-Stop-Process -Id <子PID> -Force
-Stop-Process -Id <父PID> -Force
-# 2) 用同样的命令拉起（detach，进程归系统，会话结束也存活）
+cd D:\WorkBuddy\SysCenter
+.\packaging\windows\build.ps1 -SkipFrontend   # 产出 dist_exe\SysCenter\
+# 停 EXE → 把新构建复制到 D:\software\SysCenter\（覆盖）→ 重启 EXE
+```
+
+**开发调试（只验代码，不打扰线上 EXE）**：用 dev venv 起临时实例，避开 8352：
+
+```powershell
 Start-Process -FilePath "D:\WorkBuddy\SysCenter\backend\.venv\Scripts\python.exe" `
-  -ArgumentList "-m","uvicorn","app.main:app","--host","0.0.0.0","--port","8352" `
+  -ArgumentList "-m","uvicorn","app.main:app","--host","0.0.0.0","--port","8399" `
   -WorkingDirectory "D:\WorkBuddy\SysCenter\backend" -WindowStyle Hidden
 ```
-- `main.py:127` 启动即 `load_runtime_settings()` 读库 → 新配置生效。
-- 端口 `8352` 监听即代表起来；若没起来，查 `backend/syscenter.log` 是否有 import 报错。
+
+- `main.py` 启动即 `load_runtime_settings()` 读库 → 新配置生效。
+- EXE 端口 8352 监听即代表起来；若没起来查 `D:\software\SysCenter\logs\syscenter.log`（uvicorn 日志已并入该文件）。
 
 ### 3.3 验证
 
@@ -148,3 +158,14 @@ Start-Process -FilePath "D:\WorkBuddy\SysCenter\backend\.venv\Scripts\python.exe
 - 推理模型务必让其命中 `_REASONING_SUBSTRINGS`，否则 `max_tokens` 太小会返回空 JSON / 推理链被截断。
 - 新增 OpenAI 兼容服务商时，`_provider_of()` 的 host 关键字列表（含 `siliconflow`）决定用量统计的 provider 归类，新域名记得补。
 - 笔记「问 AI」(`/api/notes/ask`) 依赖 `ai_enabled && ai_ready`，否则 400；自动探活仅 `apikey` 分类触发，tech/other 一律 `untested`。
+
+---
+
+## 5. EXE 原生化速查（2026-08-20 落地）
+
+- **交付位置**：`D:\software\SysCenter\`（整体挪移，勿只拷 exe）。结构：`SysCenter.exe` + `_internal/`（Python+依赖）+ `alembic.ini`/`migrations/`/`config/`/`frontend/dist/`/`.env`/`data/`（OTP 密钥等）。
+- **命令**：无参数 / `start` = 托盘模式（EXE 默认）；`{version|doctor|status|install|uninstall|migrate|config|backup|restore|tray}`。`version`/`doctor` 均 RC=0。
+- **自启**：`install` 写 HKCU Run `SysCenter`；`uninstall` 删；登录自动托盘运行。
+- **打包（build.ps1 已固化为可复现）**：`onedir + windowed`；`--collect-all app/asyncpg/psycopg2/cryptography/pydantic/pydantic_settings/segno/pystray/PIL + lark_oapi/uvicorn/alembic`；构建 Python 必须自带 tkinter（Python 3.12）。
+- **打包铁律**：① onefile 在本机挂死（火绒锁 1.1 万+ 解压文件、_MEI 目录堆积）→ 必须 onedir；② 缺 tkinter → 托盘 OTP 弹窗失效；③ 缺 `--collect-all app` → uvicorn 以字符串 `"app.main:app"` 加载，静态分析看不到，app.main/db/路由不打 → 后端起不来；④ `app/db.py` 启动迁移冻结态须用 `sys.executable` 目录找 alembic.ini/migrations，否则回退内联建表；⑤ uvicorn `log_config=None` 让日志进 `logs/syscenter.log`。
+- **验证**：`version`/`doctor` RC=0；`/health` 200 且 postgres/redis up；`http://127.0.0.1:8352/` 前端页面正常。

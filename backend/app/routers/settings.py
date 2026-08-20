@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from .. import db, feishu
-from ..config import (SECRET_KEYS, apply_overrides, mask_secret, runtime_dict,
+from ..config import (RUNTIME_KEYS, SECRET_KEYS, apply_overrides, mask_secret, runtime_dict,
                       settings)
 from ..security import require_auth, require_role
 
@@ -37,7 +37,12 @@ async def get_settings():
 @router.put("")
 async def put_settings(body: SettingsIn):
     raw = {}
+    skipped = []
     for k, v in body.items.items():
+        # P3-05：严格白名单，非 RUNTIME_KEYS 的 key 直接忽略，不写入库
+        if k not in RUNTIME_KEYS:
+            skipped.append(k)
+            continue
         # 密钥类：若前端回传的是脱敏占位符（****xxxx），保留原值不覆盖
         if k in SECRET_KEYS and isinstance(v, str) and v.startswith(_MASK):
             existing = getattr(settings, k, "")
@@ -55,7 +60,9 @@ async def put_settings(body: SettingsIn):
             continue
         await db.upsert_setting(k, str(v) if not isinstance(v, str) else v)
     apply_overrides(raw)
-    await db.add_audit("admin", "settings_update", "", "更新运行时设置")
+    if skipped:
+        log.warning("忽略非白名单设置项：%s", ",".join(skipped))
+    await db.add_audit("admin", "settings_update", "", "更新运行时设置" + (f"（忽略 {len(skipped)} 项）" if skipped else ""))
     # 飞书 bot 热启动：凭据补全且启用、但当前未运行时，保存后自动拉起（免重启）
     if settings.feishu_enabled and settings.feishu_app_id and settings.feishu_app_secret:
         svc = feishu.feishu_service

@@ -42,10 +42,10 @@ async def _check_once():
 
     for level, source, msg in alerts:
         try:
-            # 落库（去重：同 level+source+message 未确认则跳过）+ 飞书推送
+            # 去重落库（同 level+source+message 未确认则跳过），随后仅推送飞书（不重复落库，P2-02）
             if not await db.open_alert_exists(level, source, msg):
                 await db.save_alert(level, source, msg)
-            await feishu.notify(level, source, msg)
+                await feishu.send(level, source, msg)
         except Exception as e:
             log.warning("健康检查告警处理失败: %s", e)
 

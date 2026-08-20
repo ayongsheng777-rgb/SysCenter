@@ -31,6 +31,7 @@ SESSION_TTL = int(os.environ.get("SESSION_TTL", "43200"))  # 默认 12 小时
 
 _SECRET_FILE = os.path.join(DATA_DIR, "otp_secret")
 _ENROLLED_FILE = os.path.join(DATA_DIR, "otp_enrolled")
+_BOOTSTRAP_FILE = os.path.join(DATA_DIR, "otp_bootstrap")
 _SESSION_FILE = os.path.join(DATA_DIR, "session_secret")
 
 # 有效会话：优先存 Redis（session:<token>，带 TTL），Redis 不可用时回退到这个内存 set。
@@ -80,8 +81,39 @@ def is_setup_open() -> bool:
     return True
 
 
+def init_bootstrap() -> str | None:
+    """首次未绑定时生成一次性 Bootstrap Code（同时写入日志/控制台）。
+
+    必须携带该 Code 才能通过 /api/auth/setup 获取 OTP 密钥与二维码，
+    防止 SysCenter 首次部署后若短暂暴露公网，任意访客直接拿走初始 OTP 密钥（P1-01）。
+    已绑定或使用了环境变量 OTP_SECRET 时不生成（返回 None）。
+    """
+    if os.environ.get("OTP_SECRET") or _read(_ENROLLED_FILE):
+        return None
+    existing = _read(_BOOTSTRAP_FILE)
+    if existing:
+        return existing
+    code = secrets.token_hex(3)  # 6 位 hex，易读易输
+    _write(_BOOTSTRAP_FILE, code)
+    return code
+
+
+def verify_bootstrap(code: str | None) -> bool:
+    """校验前端回传的 Bootstrap Code 是否匹配（恒定时间比较）。"""
+    stored = _read(_BOOTSTRAP_FILE)
+    if not stored:
+        return False
+    return bool(code) and hmac.compare_digest(code.strip(), stored)
+
+
 def mark_enrolled():
     _write(_ENROLLED_FILE, datetime.now(timezone.utc).isoformat())
+    # 绑定完成后 Bootstrap Code 使命结束，清除以免被复用
+    try:
+        if os.path.exists(_BOOTSTRAP_FILE):
+            os.remove(_BOOTSTRAP_FILE)
+    except OSError:
+        pass
 
 
 def _encode_label(text: str) -> str:
