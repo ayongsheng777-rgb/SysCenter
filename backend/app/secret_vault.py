@@ -39,6 +39,15 @@ _master_key_cache = None
 
 _IS_WINDOWS = os.name == "nt"
 
+# Windows DPAPI 结构体：ctypes.wintypes 未提供 DATA_BLOB，需自行定义
+if _IS_WINDOWS:
+    import ctypes as _ctypes
+    from ctypes import wintypes as _wintypes
+
+    class _DATA_BLOB(_ctypes.Structure):
+        _fields_ = [("cbData", _wintypes.DWORD),
+                    ("pbData", _ctypes.POINTER(_ctypes.c_char))]
+
 
 # ==================== Windows DPAPI（ctypes） ====================
 def _dpapi_available() -> bool:
@@ -47,42 +56,44 @@ def _dpapi_available() -> bool:
 
 def _dpapi_protect(plain: bytes) -> bytes:
     import ctypes
-    from ctypes import wintypes, byref, c_buffer
+    from ctypes import byref
 
     crypt32 = ctypes.windll.crypt32  # type: ignore[attr-defined]
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
     CRYPTPROTECT_UI_FORBIDDEN = 0x40
 
-    data_in = c_buffer(plain, len(plain))
-    out = wintypes.DATA_BLOB()
+    buf = ctypes.create_string_buffer(plain, len(plain))
+    blob_in = _DATA_BLOB(len(plain), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    blob_out = _DATA_BLOB()
     res = crypt32.CryptProtectData(
-        byref(wintypes.DATA_BLOB(ctypes.sizeof(data_in), ctypes.cast(data_in, ctypes.POINTER(wintypes.c_char)))),
-        None, None, None, None, CRYPTPROTECT_UI_FORBIDDEN, byref(out))
+        byref(blob_in), None, None, None, None, CRYPTPROTECT_UI_FORBIDDEN, byref(blob_out))
     if not res:
         raise OSError("CryptProtectData 失败")
     try:
-        return ctypes.string_at(out.pbData, out.cbData)
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
     finally:
-        ctypes.windll.kernel32.LocalFree(out.pbData)  # type: ignore[attr-defined]
+        kernel32.LocalFree(blob_out.pbData)
 
 
 def _dpapi_unprotect(blob: bytes) -> bytes:
     import ctypes
-    from ctypes import wintypes, byref, c_buffer
+    from ctypes import byref
 
     crypt32 = ctypes.windll.crypt32  # type: ignore[attr-defined]
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
     CRYPTPROTECT_UI_FORBIDDEN = 0x40
 
-    data_in = c_buffer(blob, len(blob))
-    out = wintypes.DATA_BLOB()
+    buf = ctypes.create_string_buffer(blob, len(blob))
+    blob_in = _DATA_BLOB(len(blob), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    blob_out = _DATA_BLOB()
     res = crypt32.CryptUnprotectData(
-        byref(wintypes.DATA_BLOB(ctypes.sizeof(data_in), ctypes.cast(data_in, ctypes.POINTER(wintypes.c_char)))),
-        None, None, None, None, CRYPTPROTECT_UI_FORBIDDEN, byref(out))
+        byref(blob_in), None, None, None, None, CRYPTPROTECT_UI_FORBIDDEN, byref(blob_out))
     if not res:
         raise OSError("CryptUnprotectData 失败")
     try:
-        return ctypes.string_at(out.pbData, out.cbData)
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
     finally:
-        ctypes.windll.kernel32.LocalFree(out.pbData)  # type: ignore[attr-defined]
+        kernel32.LocalFree(blob_out.pbData)
 
 
 # ==================== AES-256-GCM 回退 ====================

@@ -20,8 +20,9 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from . import auth, db, feishu, scheduler
 from .config import settings
 from .request_ctx import get_request_id, set_request_context
-from .routers import (ai, alerts, audit, auth as auth_router, automation, feishu_bot,
-                      modules, network, notify, notes, settings as settings_router, system, todos, vps)
+from .routers import (ai, alerts, audit, auth as auth_router, automation, backup as backup_router,
+                      feishu_bot, modules, network, notify, notes, settings as settings_router,
+                      skills, system, todos, vps)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("main")
@@ -67,7 +68,7 @@ async def security_headers(request, call_next):
     return resp
 
 # 路由注册
-for r in (auth_router, system, network, vps, modules, ai, notify, settings_router, automation, alerts, feishu_bot, todos, audit, notes):
+for r in (auth_router, system, network, vps, modules, ai, notify, settings_router, automation, alerts, feishu_bot, todos, audit, notes, skills, backup_router):
     app.include_router(r.router)
 
 
@@ -227,6 +228,13 @@ async def on_startup():
         log.warning("=" * 60)
     await db.init_pool()
     await db.load_runtime_settings()
+    # 技能运行时初始化（B 路：可执行技能，内置技能首次写入可写技能目录）
+    try:
+        from .skills import init_skills
+        n = init_skills()
+        log.info("技能运行时已初始化，加载 %d 个技能", n)
+    except Exception as e:  # noqa: BLE001
+        log.warning("技能运行时初始化失败（不影响主流程）：%s", e)
     scheduler.start()
     feishu.start_feishu_bot()
     log.info("SysCenter 启动完成，监听 %s:%s", settings.backend_host, settings.backend_port)

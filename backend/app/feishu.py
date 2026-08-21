@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import threading
 import time
 import urllib.parse
@@ -331,6 +332,22 @@ class FeishuService:
                 await self._cmd_show_plaintext(chat_id, text[len(kw):].strip(" ：:　#"))
                 return
 
+        # ===== 技能安装（A 路：遥控装 SkillHub 技能，先列命令再确认）=====
+        from . import skill_installer
+        if skill_installer.is_install_request(text):
+            await self._cmd_install_skill(chat_id, text)
+            return
+
+        # ===== 确认执行（配合装技能的命令清单）=====
+        m_confirm = re.match(r"^确认\s*([A-Za-z0-9]+)\s*$", text.strip())
+        if m_confirm:
+            await self._cmd_confirm(chat_id, m_confirm.group(1))
+            return
+
+        # ===== 技能分发（B 路：触发词命中已装技能）=====
+        if await self._try_dispatch_skill(chat_id, text):
+            return
+
         # 其余任意文字 → 转发给 AI（DeepSeek）
         await self._cmd_ai(chat_id, text)
 
@@ -400,6 +417,65 @@ class FeishuService:
             lines.append(f"#{t['id']} · {t['content']}")
         lines.append("\n完成某条：完成 <编号>")
         await self.send_text(chat_id, "\n".join(lines), "chat_id")
+
+    async def _cmd_install_skill(self, chat_id: str, text: str) -> None:
+        """解析「装技能」指令，生成命令清单待确认（不直接执行）。"""
+        from . import skill_installer
+        plan = skill_installer.build_plan(text)
+        if not plan:
+            await self.send_text(chat_id,
+                                 "⚠️ 无法识别要安装的技能。\n"
+                                 "支持格式：\n"
+                                 "· `装技能 @user_xxx/技能名`（SkillHub 技能）\n"
+                                 "· `根据 <skillhub 链接> 安装 @user_xxx/技能名`",
+                                 "chat_id")
+            return
+        cid = skill_installer.add_pending(chat_id, plan)
+        await self.send_text(chat_id, skill_installer.format_plan(plan, cid), "chat_id")
+
+    async def _cmd_confirm(self, chat_id: str, cid: str) -> None:
+        from . import skill_installer
+        await self.send_text(chat_id, "⏳ 正在执行，请稍候…", "chat_id")
+        result = await skill_installer.confirm_and_run(cid)
+        await self.send_text(chat_id, result, "chat_id")
+
+    async def _try_dispatch_skill(self, chat_id: str, text: str) -> bool:
+        """触发词命中已装技能则执行并返回 True，否则 False。
+
+        支持两种触发：
+        1. 按 key 显式调用：`/技能key 内容`（如 `/weather 深圳`），精准命中
+        2. 触发词模糊匹配：消息里出现技能 trigger_keywords 即命中
+        """
+        from .skills import get_registry
+        try:
+            reg = get_registry()
+        except Exception as e:  # noqa: BLE001
+            log.warning("[feishu] 技能注册表初始化失败：%s", e)
+            return False
+        key, payload = self._match_skill_key(reg, text)
+        if not key:
+            skills = reg.get_available_skills()
+            key = reg.keyword_match(text, skills)
+            payload = text
+        if not key or not reg.has_skill(key):
+            return False
+        skill = reg.get_skill(key)
+        try:
+            reply = await skill.execute(payload, [], user_id=chat_id)
+        except Exception as e:  # noqa: BLE001
+            reply = f"技能[{key}]执行出错：{type(e).__name__}: {e}"
+        if reply:
+            await self.send_text(chat_id, reply, "chat_id")
+        return True
+
+    @staticmethod
+    def _match_skill_key(reg, text: str) -> tuple[str | None, str]:
+        """按 `/key 内容` 显式调用。返回 (技能key, 去除前缀后的内容)。"""
+        t = (text or "").strip()
+        m = re.match(r"^/([A-Za-z0-9._-]+)(?:\s+([\s\S]*))?$", t)
+        if m and reg.has_skill(m.group(1)):
+            return m.group(1), (m.group(2) or "").strip()
+        return None, ""
 
     async def _cmd_ai(self, chat_id: str, text: str) -> None:
         if not settings.ai_enabled:
@@ -682,6 +758,11 @@ class FeishuService:
             "· `查笔记 <关键词>` — 检索已存笔记\n"
             "· `笔记列表` — 查看已存笔记\n"
             "· `明文 <编号>` / `明文显示 <编号>` — 查看某条记录的完整明文（API Key / 验证码等）\n"
+            "· `装技能 @user_xxx/技能名` — 安装 SkillHub 技能（先列命令，回「确认 编号」执行）\n"
+            "· `根据 <skillhub 链接> 安装 @user_xxx/技能名` — 同上，自动先装 skillhub CLI\n"
+            "· `确认 <编号>` — 执行已列出的安装命令\n"
+            "· `/技能key 内容` — 按 key 精准调用技能（如 `/weather 深圳`）\n"
+            "· `天气 <城市>` — 天气技能（触发词匹配示例，发「技能」可在网页查看全部技能）\n"
             "· 其它任意文字 — 转发给 AI（DeepSeek）问答，也可自然语言让它存笔记\n\n"
             "⚠️ 首次使用请**私聊**本 bot 完成管理员配对（自动绑定你的账号）。"
         )

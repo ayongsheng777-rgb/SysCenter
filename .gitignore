@@ -35,3 +35,4 @@ Thumbs.db
 # ===== 临时 / 误写（Git-Bash 路径坑残留）=====
 /d/
 /d/WorkBuddy/
+tmp/
