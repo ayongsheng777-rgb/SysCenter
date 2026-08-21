@@ -29,7 +29,8 @@ def _run(args: list[str], timeout: int = 15) -> tuple[int, str]:
     # 按字节读取，避免中文 Windows 下 sc/reg 输出 GBK(CP936) 导致 UTF-8 解码崩溃(500)。
     enc = locale.getpreferredencoding() or "cp936"
     try:
-        r = subprocess.run(args, capture_output=True, timeout=timeout, shell=False)
+        r = subprocess.run(args, capture_output=True, timeout=timeout, shell=False,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         out = (r.stdout or b"").decode(enc, errors="replace")
         out += (r.stderr or b"").decode(enc, errors="replace")
         return r.returncode, out.strip()

@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 
-from . import db, feishu, modules
+from . import backup, db, feishu, modules
 from .config import settings
 
 log = logging.getLogger("scheduler")
@@ -54,6 +54,11 @@ async def _loop():
     while _running:
         if settings.health_check_enabled:
             await _check_once()
+        # 自动灾变备份周期检查（backup.check_and_backup 内部 1 小时节流 + 周期判断）
+        try:
+            await backup.check_and_backup()
+        except Exception as e:  # noqa: BLE001
+            log.warning("备份周期检查失败(忽略): %s", e)
         try:
             await asyncio.sleep(max(30, settings.health_check_interval))
         except asyncio.CancelledError:

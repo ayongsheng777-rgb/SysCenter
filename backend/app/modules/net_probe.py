@@ -24,7 +24,8 @@ def ping(ip: str, timeout_ms: int = 800) -> Optional[float]:
     try:
         r = subprocess.run(
             ["ping", "-n", "1", "-w", str(timeout_ms), ip],
-            capture_output=True, text=True, timeout=max(2, timeout_ms / 1000 + 1))
+            capture_output=True, text=True, timeout=max(2, timeout_ms / 1000 + 1),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         out = r.stdout
         if "TTL=" in out or "Reply from" in out or "回复来自" in out:
             # 提取时间
@@ -52,7 +53,8 @@ def arp_table() -> dict[str, str]:
     """返回 {ip: mac}。Windows: arp -a。"""
     out = {}
     try:
-        r = subprocess.run(["arp", "-a"], capture_output=True, text=True, timeout=10)
+        r = subprocess.run(["arp", "-a"], capture_output=True, text=True, timeout=10,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         for line in r.stdout.splitlines():
             parts = line.split()
             if len(parts) >= 2 and _is_ipv4(parts[0]):

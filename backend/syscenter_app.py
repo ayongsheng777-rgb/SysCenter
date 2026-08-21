@@ -300,7 +300,8 @@ def _probe_health() -> str:
 def _check_docker() -> tuple[str, str]:
     try:
         out = subprocess.run(["docker", "info", "--format", "{{.ServerVersion}}"],
-                             capture_output=True, text=True, timeout=10)
+                             capture_output=True, text=True, timeout=10,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if out.returncode == 0:
             return "PASS", f"Docker {out.stdout.strip()}"
         return "WARN", "Docker 已安装但引擎未运行"
@@ -525,20 +526,26 @@ def _win_service_control(action: str):
 
 # ===== 系统托盘（GUI 模式） & 开机自启 & OTP 退出 =====
 def _messagebox(title: str, message: str, error: bool = False):
-    """窗口化提示（EXE 无控制台时使用）；失败时回退日志。"""
-    try:
-        import tkinter as tk
-        from tkinter import messagebox
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        if error:
-            messagebox.showerror(title, message)
-        else:
-            messagebox.showinfo(title, message)
-        root.destroy()
-    except Exception:  # noqa: BLE001
-        log.info("[%s] %s", title, message)
+    """窗口化提示：在独立线程中延迟弹出 Windows 原生 MessageBox。
+
+    pystray 的菜单回调是在 TrackPopupMenuEx 返回后同步执行的，此刻菜单的鼠标捕获/
+    焦点尚未完全释放，若在此刻同步弹任何模态框（tkinter 或 MessageBoxW 都一样），
+    对话框会显示但点击“确定”无响应、无法关闭。故把弹窗放到独立线程并延迟 150ms，
+    等菜单清理完成后再弹，即可正常交互。
+    """
+    def _show():
+        time.sleep(0.15)
+        try:
+            import ctypes
+            MB_OK = 0x0
+            MB_ICONERROR = 0x10
+            MB_ICONINFORMATION = 0x40
+            MB_SETFOREGROUND = 0x10000
+            flags = MB_OK | MB_SETFOREGROUND | (MB_ICONERROR if error else MB_ICONINFORMATION)
+            ctypes.windll.user32.MessageBoxW(0, message, title, flags)
+        except Exception:  # noqa: BLE001
+            log.info("[%s] %s", title, message)
+    threading.Thread(target=_show, daemon=True).start()
 
 
 def _build_tray_icon():
@@ -562,30 +569,30 @@ def _build_tray_icon():
 
 
 def _prompt_otp() -> str | None:
-    """弹出 OTP 输入框；tkinter 不可用/无桌面时回退 PowerShell WinForms InputBox。"""
+    """弹出 OTP 输入框：使用 PowerShell + Microsoft.VisualBasic.InputBox（独立进程）。
+
+    不能用 tkinter simpledialog：pystray 的菜单回调在 Win32 消息循环线程中同步执行，
+    在其中同步弹出 Tk 模态对话框会导致事件循环冲突，输入后无响应、无法退出。
+    InputBox 在独立 powershell 进程中运行，互不干扰。
+    """
+    import base64
+    ps = (
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+        "Add-Type -AssemblyName Microsoft.VisualBasic; "
+        "$r = [Microsoft.VisualBasic.Interaction]::InputBox("
+        "'SysCenter 正在运行。请输入身份验证器(OTP)动态码以安全退出：', "
+        "'退出认证', ''); "
+        "if ($null -ne $r) { [Console]::Write($r) }"
+    )
     try:
-        import tkinter as tk
-        from tkinter import simpledialog
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        code = simpledialog.askstring(
-            "退出认证", "SysCenter 正在运行。\n请输入身份验证器(OTP)动态码以安全退出：",
-            parent=root)
-        root.destroy()
-        return code
-    except Exception:  # noqa: BLE001
-        pass
-    # 回退方案：PowerShell + Microsoft.VisualBasic.InputBox（免 tkinter / 免桌面）
-    try:
-        import subprocess
-        ps = ("Add-Type -AssemblyName Microsoft.VisualBasic; "
-              "[Microsoft.VisualBasic.Interaction]::InputBox("
-              "'SysCenter 正在运行。请输入身份验证器(OTP)动态码以安全退出：','退出认证')")
+        # -EncodedCommand 用 UTF-16LE 传脚本，规避中文命令行/引号转义问题
+        encoded = base64.b64encode(ps.encode("utf-16le")).decode("ascii")
         r = subprocess.run(
-            ["powershell", "-NoProfile", "-STA", "-Command", ps],
-            capture_output=True, text=True, timeout=120,
-            creationflags=subprocess.CREATE_NO_WINDOW)
+            ["powershell", "-NoProfile", "-STA", "-WindowStyle", "Hidden",
+             "-EncodedCommand", encoded],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=180,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         out = (r.stdout or "").strip()
         return out or None
     except Exception:  # noqa: BLE001
@@ -606,7 +613,12 @@ def _run_tray(server_thread):
             pass
         return
 
-    url = f"http://{settings.backend_host or '127.0.0.1'}:{settings.backend_port}"
+    # 浏览器访问地址：backend_host 是监听地址（0.0.0.0/:: 表示绑定所有网卡），
+    # 浏览器打不开 0.0.0.0，须转成回环地址 127.0.0.1 才能访问。
+    _web_host = settings.backend_host or "127.0.0.1"
+    if _web_host in ("0.0.0.0", "::", "[::]"):
+        _web_host = "127.0.0.1"
+    url = f"http://{_web_host}:{settings.backend_port}"
 
     def on_open(icon, item):
         import webbrowser

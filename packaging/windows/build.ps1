@@ -108,7 +108,9 @@ try {
     Copy-Item "backend/alembic.ini"        -Destination $appHome -Force
     Copy-Item "backend/migrations"        -Destination $appHome -Recurse -Force
     Copy-Item "config"                    -Destination $appHome -Recurse -Force
-    Copy-Item "frontend/dist"             -Destination $appHome -Recurse -Force
+    # main.py 的 _find_frontend_dist() 找的是 <exe目录>/frontend/dist，必须复制到该层级
+    New-Item -ItemType Directory -Force -Path (Join-Path $appHome "frontend") | Out-Null
+    Copy-Item "frontend/dist"             -Destination (Join-Path $appHome "frontend\dist") -Recurse -Force
     if (Test-Path ".env") { Copy-Item ".env" -Destination $appHome -Force }
     else { Copy-Item ".env.example" -Destination (Join-Path $appHome ".env") -Force }
 

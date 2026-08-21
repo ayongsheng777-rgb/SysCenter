@@ -126,6 +126,18 @@ CREATE TABLE IF NOT EXISTS ai_notes (
     updated_at   TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_ai_notes_ts ON ai_notes(created_at DESC);
+
+-- 自动灾变备份记录（backup.py 落库：full 全量 / incr 增量）
+CREATE TABLE IF NOT EXISTS backup_log (
+    id           BIGSERIAL PRIMARY KEY,
+    backup_type  TEXT NOT NULL,                -- full|incr
+    file_path    TEXT,
+    file_size    BIGINT NOT NULL DEFAULT 0,
+    status       TEXT NOT NULL DEFAULT 'success',  -- success|failed
+    message      TEXT NOT NULL DEFAULT '',
+    created_at   TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_backup_log_ts ON backup_log(created_at DESC);
 """
 
 
